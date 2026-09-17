@@ -212,6 +212,16 @@ export const Login: React.FC = () => {
             <span>Sign In</span>
           )}
         </button>
+
+        {/* Internal Team Access Shortcut */}
+        <div className="mt-5 pt-4 border-t border-[#E2E8F4] text-center">
+          <Link
+            to="/internal/login"
+            className="inline-flex items-center space-x-1 text-xs font-semibold text-[#1B3270] hover:text-[#2952A3] hover:underline"
+          >
+            <span>TerraTern Staff &amp; Team Access →</span>
+          </Link>
+        </div>
       </form>
     </AuthLayout>
   );

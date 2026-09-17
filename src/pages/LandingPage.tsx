@@ -541,6 +541,12 @@ export const LandingPage: React.FC = () => {
               Sign In
             </button>
             <button
+              onClick={() => navigate('/internal/login')}
+              className="text-xs font-semibold text-[#64748B] hover:text-[#1B3270] transition-colors px-2.5 py-1 rounded-[6px] border border-[#E2E8F4] hover:bg-[#F8FAFD]"
+            >
+              Team Access
+            </button>
+            <button
               onClick={() => navigate('/register?role=candidate')}
               className="px-6 py-2.5 bg-[#1B3270] text-white text-sm font-semibold rounded-[6px] hover:bg-[#2952A3] transition-all shadow-[0_2px_8px_rgba(27,50,112,0.15)] active:scale-[0.99]"
             >
@@ -605,6 +611,15 @@ export const LandingPage: React.FC = () => {
               className="w-full mt-2 py-2 border border-[#1B3270] text-[#1B3270] text-sm font-semibold rounded-[6px] text-center"
             >
               Sign In
+            </button>
+            <button
+              onClick={() => {
+                setMobileMenuOpen(false);
+                navigate('/internal/login');
+              }}
+              className="w-full mt-2 py-2 bg-slate-100 text-[#1B3270] text-sm font-semibold rounded-[6px] text-center"
+            >
+              TerraTern Team Access
             </button>
             <button
               onClick={() => {
@@ -2278,6 +2293,11 @@ export const LandingPage: React.FC = () => {
                 <li>
                   <button onClick={handleSupplierCta} className="hover:text-white transition-colors">
                     Channel Partner Portal Login
+                  </button>
+                </li>
+                <li>
+                  <button onClick={() => navigate('/internal/login')} className="hover:text-white transition-colors text-amber-300 font-medium">
+                    TerraTern Team Access
                   </button>
                 </li>
                 <li>
