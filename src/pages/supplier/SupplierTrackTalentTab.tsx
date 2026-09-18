@@ -12,6 +12,7 @@ import {
 import { EmptyState } from '../../components/ui/EmptyState';
 import { getApplicationStatusLabel } from '../../utils/labels';
 import { MultiSelectFilter } from '../../components/ui/MultiSelectFilter';
+import { SupplierCandidateDetailPanel } from './components/SupplierCandidateDetailPanel';
 
 interface SupplierTrackTalentTabProps {
   supplier: any;
@@ -95,6 +96,7 @@ export const SupplierTrackTalentTab: React.FC<SupplierTrackTalentTabProps> = ({
   const [jobFitScores, setJobFitScores] = useState<Record<string, number>>({});
   const [selectedJobToSubmit, setSelectedJobToSubmit] = useState<any | null>(null);
   const [submittingToJob, setSubmittingToJob] = useState(false);
+  const [selectedCandidateForDetail, setSelectedCandidateForDetail] = useState<ActiveCandidate | null>(null);
 
   // Withdrawal Modal State
   const [withdrawModalData, setWithdrawModalData] = useState<{
@@ -570,7 +572,13 @@ export const SupplierTrackTalentTab: React.FC<SupplierTrackTalentTabProps> = ({
                     >
                       {/* Name (Full name, never anonymized for supplier) */}
                       <td className="py-3.5 px-4 font-semibold text-[#0F172A]">
-                        {fullName}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedCandidateForDetail(cand)}
+                          className="font-semibold text-[#1B3270] hover:text-[#2952A3] hover:underline text-left cursor-pointer"
+                        >
+                          {fullName}
+                        </button>
                       </td>
 
                       {/* Target Role */}
@@ -879,6 +887,20 @@ export const SupplierTrackTalentTab: React.FC<SupplierTrackTalentTabProps> = ({
                 <span>Confirm Withdrawal</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Candidate Detail Modal */}
+      {selectedCandidateForDetail && (
+        <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+          <div className="bg-white rounded-[10px] border border-[#E2E8F4] max-w-5xl w-full h-[92vh] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
+            <SupplierCandidateDetailPanel
+              candidateId={selectedCandidateForDetail.id}
+              initialTab="profile"
+              onClose={() => setSelectedCandidateForDetail(null)}
+              onCandidateUpdated={fetchTrackData}
+            />
           </div>
         </div>
       )}

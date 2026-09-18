@@ -5,8 +5,6 @@ import {
   ListOrdered,
   Copy,
   Check,
-  Bell,
-  Clock,
   Users,
   FileSpreadsheet,
   ChevronDown,
@@ -16,11 +14,13 @@ import {
   X,
   Loader2,
   Send,
+  FileText,
 } from 'lucide-react';
 import { getGateLabel } from '../../utils/labels';
 import { BulkCandidateUpload } from './BulkCandidateUpload';
 import { notifyByRole } from '../../utils/notificationRouting';
-import { CandidateProfileDetailView } from '../internal/components/CandidateProfileDetailView';
+import { SupplierCandidateDetailPanel } from './components/SupplierCandidateDetailPanel';
+import { MANDATORY_DOC_COUNT } from '../../utils/documentTypes';
 import { MultiSelectFilter } from '../../components/ui/MultiSelectFilter';
 
 interface SupplierPostTalentTabProps {
@@ -87,6 +87,7 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
   // Dropdown Action State
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [selectedCandidateForDetail, setSelectedCandidateForDetail] = useState<any | null>(null);
+  const [selectedCandidateDefaultTab, setSelectedCandidateDefaultTab] = useState<'profile' | 'documents' | 'notes' | 'progress'>('profile');
 
   // Edit Candidate Modal
   const [editCandidate, setEditCandidate] = useState<any | null>(null);
@@ -191,6 +192,7 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
           created_at,
           status,
           invite_token,
+          profile_completion_pct,
           profiles:user_id (
             email,
             phone
@@ -208,20 +210,40 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
 
       const candList = cands || [];
 
-      // Fetch gate results for these candidates to derive current stage
+      // Fetch gate results and documents for these candidates to derive stage and doc stats
       if (candList.length > 0) {
         const candIds = candList.map((c) => c.id);
-        const { data: gates } = await supabase
-          .from('gate_results')
-          .select('*')
-          .in('candidate_id', candIds)
-          .order('created_at', { ascending: false });
+        const [gatesRes, docsRes] = await Promise.all([
+          supabase
+            .from('gate_results')
+            .select('*')
+            .in('candidate_id', candIds)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('documents')
+            .select('candidate_id, status, is_mandatory')
+            .in('candidate_id', candIds),
+        ]);
 
         // Map candidate to latest gate result
         const latestGateMap: Record<string, any> = {};
-        (gates || []).forEach((g) => {
+        (gatesRes.data || []).forEach((g) => {
           if (!latestGateMap[g.candidate_id]) {
             latestGateMap[g.candidate_id] = g;
+          }
+        });
+
+        // Map candidate to docs summary
+        const candDocsMap: Record<string, { verified: number; mandatory: number; hasRejected: boolean }> = {};
+        (docsRes.data || []).forEach((d) => {
+          if (!candDocsMap[d.candidate_id]) {
+            candDocsMap[d.candidate_id] = { verified: 0, mandatory: MANDATORY_DOC_COUNT, hasRejected: false };
+          }
+          if (d.is_mandatory && d.status === 'verified') {
+            candDocsMap[d.candidate_id].verified++;
+          }
+          if (d.is_mandatory && d.status === 'rejected') {
+            candDocsMap[d.candidate_id].hasRejected = true;
           }
         });
 
@@ -230,6 +252,7 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
           email: c.email || c.profiles?.email || null,
           phone: c.phone || c.profiles?.phone || null,
           latestGate: latestGateMap[c.id] || null,
+          docsSummary: candDocsMap[c.id] || { verified: 0, mandatory: MANDATORY_DOC_COUNT, hasRejected: false },
         }));
 
         setInFlowCandidates(merged);
@@ -429,13 +452,6 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
     } finally {
       setDeletingCandidate(false);
     }
-  };
-
-  const calculateDaysInStage = (cand: any) => {
-    const d = cand.latestGate?.created_at || cand.created_at;
-    if (!d) return 0;
-    const diff = Date.now() - new Date(d).getTime();
-    return Math.max(0, Math.floor(diff / (1000 * 60 * 60 * 24)));
   };
 
   const formatStageName = (gateType?: string) => {
@@ -749,15 +765,15 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
                 <thead>
                   <tr className="border-b border-[#E2E8F4] text-[#94A3B8] font-semibold uppercase tracking-wider">
                     <th className="py-3 px-3">Name</th>
-                    <th className="py-3 px-3">Current Stage</th>
+                    <th className="py-3 px-3">Stage</th>
                     <th className="py-3 px-3">Status</th>
-                    <th className="py-3 px-3">Days in Stage</th>
+                    <th className="py-3 px-3">Profile %</th>
+                    <th className="py-3 px-3">Docs</th>
                     <th className="py-3 px-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2E8F4]">
                   {filteredInFlowCandidates.map((cand) => {
-                    const days = calculateDaysInStage(cand);
                     const stageLabel = formatStageName(cand.latestGate?.gate_type);
                     const statusLabel = cand.latestGate?.status || 'Pending';
                     const isDropdownOpen = openDropdownId === cand.id;
@@ -765,13 +781,23 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
                     return (
                       <tr key={cand.id} className="hover:bg-[#F8FAFD] transition-colors">
                         <td className="py-3 px-3 font-semibold text-[#1B3270]">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedCandidateForDetail(cand)}
-                            className="font-semibold text-[#1B3270] hover:text-[#2952A3] hover:underline text-left cursor-pointer"
-                          >
-                            {cand.first_name} {cand.last_name}
-                          </button>
+                          <div className="flex items-center space-x-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedCandidateDefaultTab('profile');
+                                setSelectedCandidateForDetail(cand);
+                              }}
+                              className="font-semibold text-[#1B3270] hover:text-[#2952A3] hover:underline text-left cursor-pointer"
+                            >
+                              {cand.first_name} {cand.last_name}
+                            </button>
+                            {(cand.profile_completion_pct || 0) < 100 && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                Incomplete
+                              </span>
+                            )}
+                          </div>
                           {cand.email && (
                             <div className="text-[11px] text-[#94A3B8] font-normal">
                               {cand.email}
@@ -792,117 +818,150 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
                             {statusLabel}
                           </span>
                         </td>
-                        <td className="py-3 px-3 text-[#4A5568]">
-                          <span className="flex items-center">
-                            <Clock size={12} className="mr-1 text-[#94A3B8]" />
-                            {days} day{days === 1 ? '' : 's'}
-                          </span>
+
+                        {/* PROFILE % COLUMN */}
+                        <td className="py-3 px-3">
+                          {(() => {
+                            const pct = cand.profile_completion_pct || 0;
+                            const barColor = pct >= 100 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-500' : 'bg-rose-500';
+                            return (
+                              <div className="flex items-center space-x-2">
+                                <div className="w-[60px] bg-slate-100 rounded-full h-2 overflow-hidden shrink-0">
+                                  <div className={`h-full ${barColor}`} style={{ width: `${Math.min(100, pct)}%` }} />
+                                </div>
+                                <span className="text-xs font-semibold text-slate-700">{pct}%</span>
+                              </div>
+                            );
+                          })()}
                         </td>
 
-                        {/* ACTIONS DROPDOWN */}
+                        {/* DOCS COLUMN */}
+                        <td className="py-3 px-3 font-semibold text-xs">
+                          {(() => {
+                            const summary = cand.docsSummary || { verified: 0, mandatory: MANDATORY_DOC_COUNT, hasRejected: false };
+                            const textColor =
+                              summary.verified >= summary.mandatory
+                                ? 'text-emerald-600'
+                                : summary.hasRejected
+                                ? 'text-rose-600'
+                                : 'text-amber-600';
+                            return (
+                              <span className={textColor}>
+                                {summary.verified}/{summary.mandatory}
+                              </span>
+                            );
+                          })()}
+                        </td>
+
+                        {/* ACTIONS COLUMN */}
                         <td className="py-3 px-3 text-right">
-                          <div className="relative inline-block text-left">
+                          <div className="flex items-center justify-end space-x-1.5">
                             <button
                               type="button"
-                              onClick={() => setOpenDropdownId(isDropdownOpen ? null : cand.id)}
-                              className="py-1 px-3 bg-white hover:bg-slate-50 text-[#1B3270] border border-[#E2E8F4] text-[11px] font-semibold rounded-[6px] transition-colors inline-flex items-center space-x-1 shadow-2xs cursor-pointer"
+                              onClick={() => {
+                                setSelectedCandidateDefaultTab('profile');
+                                setSelectedCandidateForDetail(cand);
+                              }}
+                              className="py-1 px-2.5 bg-white hover:bg-slate-50 text-[#1B3270] border border-[#1B3270]/30 hover:border-[#1B3270] text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer whitespace-nowrap shadow-2xs"
                             >
-                              <span>Actions</span>
-                              <ChevronDown
-                                size={12}
-                                className={`transition-transform duration-150 ${
-                                  isDropdownOpen ? 'rotate-180' : ''
-                                }`}
-                              />
+                              Complete Profile
                             </button>
 
-                            {isDropdownOpen && (
-                              <>
-                                {/* Click-outside overlay */}
-                                <div
-                                  className="fixed inset-0 z-20"
-                                  onClick={() => setOpenDropdownId(null)}
+                            <button
+                              type="button"
+                              disabled={nudgingId === cand.id}
+                              onClick={() => handleNudge(cand)}
+                              className="py-1 px-2.5 bg-white hover:bg-slate-50 text-slate-700 border border-[#E2E8F4] text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer whitespace-nowrap shadow-2xs"
+                            >
+                              {nudgingId === cand.id ? 'Sending...' : cand.user_id ? 'Send Reminder' : 'Copy Invite Link'}
+                            </button>
+
+                            <div className="relative inline-block text-left">
+                              <button
+                                type="button"
+                                onClick={() => setOpenDropdownId(isDropdownOpen ? null : cand.id)}
+                                className="py-1 px-2 bg-white hover:bg-slate-50 text-slate-600 border border-[#E2E8F4] text-[11px] font-semibold rounded-[6px] transition-colors inline-flex items-center shadow-2xs cursor-pointer"
+                              >
+                                <ChevronDown
+                                  size={12}
+                                  className={`transition-transform duration-150 ${
+                                    isDropdownOpen ? 'rotate-180' : ''
+                                  }`}
                                 />
+                              </button>
 
-                                <div className="absolute right-0 mt-1 w-48 bg-white border border-[#E2E8F4] rounded-[8px] shadow-lg py-1 z-30 divide-y divide-[#E2E8F4] text-xs text-left animate-in fade-in zoom-in-95 duration-100">
-                                  <div className="py-1">
-                                    {/* View Full Profile */}
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenDropdownId(null);
-                                        setSelectedCandidateForDetail(cand);
-                                      }}
-                                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-[#1B3270] font-medium cursor-pointer transition-colors"
-                                    >
-                                      <Users size={13} className="text-[#1B3270]" />
-                                      <span>View Full Profile</span>
-                                    </button>
-
-                                    {/* Send Reminder */}
-                                    <button
-                                      type="button"
-                                      disabled={nudgingId === cand.id}
-                                      onClick={() => {
-                                        setOpenDropdownId(null);
-                                        handleNudge(cand);
-                                      }}
-                                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-[#1B3270] font-medium cursor-pointer transition-colors"
-                                    >
-                                      <Bell size={13} className="text-[#1B3270]" />
-                                      <span>
-                                        {nudgingId === cand.id
-                                          ? 'Sending...'
-                                          : cand.user_id
-                                          ? 'Send Reminder'
-                                          : 'Copy Invite Link'}
-                                      </span>
-                                    </button>
-
-                                    {/* Edit Details */}
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenDropdownId(null);
-                                        handleOpenEdit(cand);
-                                      }}
-                                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-slate-700 font-medium cursor-pointer transition-colors"
-                                    >
-                                      <Edit3 size={13} className="text-amber-600" />
-                                      <span>Edit Details</span>
-                                    </button>
-
-                                    {/* Escalate to Lead / RM */}
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenDropdownId(null);
-                                        handleOpenEscalate(cand);
-                                      }}
-                                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-slate-700 font-medium cursor-pointer transition-colors"
-                                    >
-                                      <AlertTriangle size={13} className="text-indigo-600" />
-                                      <span>Escalate to Lead / RM</span>
-                                    </button>
+                              {isDropdownOpen && (
+                                <>
+                                  <div
+                                    className="fixed inset-0 z-20"
+                                    onClick={() => setOpenDropdownId(null)}
+                                  />
+                                  <div className="absolute right-0 mt-1 w-48 bg-white border border-[#E2E8F4] rounded-[8px] shadow-lg py-1 z-30 divide-y divide-[#E2E8F4] text-xs text-left animate-in fade-in zoom-in-95 duration-100">
+                                    <div className="py-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setOpenDropdownId(null);
+                                          setSelectedCandidateDefaultTab('profile');
+                                          setSelectedCandidateForDetail(cand);
+                                        }}
+                                        className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-[#1B3270] font-medium cursor-pointer transition-colors"
+                                      >
+                                        <Users size={13} className="text-[#1B3270]" />
+                                        <span>View Full Profile</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setOpenDropdownId(null);
+                                          setSelectedCandidateDefaultTab('documents');
+                                          setSelectedCandidateForDetail(cand);
+                                        }}
+                                        className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-[#1B3270] font-medium cursor-pointer transition-colors"
+                                      >
+                                        <FileText size={13} className="text-[#1B3270]" />
+                                        <span>Documents</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setOpenDropdownId(null);
+                                          handleOpenEdit(cand);
+                                        }}
+                                        className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-slate-700 font-medium cursor-pointer transition-colors"
+                                      >
+                                        <Edit3 size={13} className="text-amber-600" />
+                                        <span>Edit Details</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setOpenDropdownId(null);
+                                          handleOpenEscalate(cand);
+                                        }}
+                                        className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-slate-700 font-medium cursor-pointer transition-colors"
+                                      >
+                                        <AlertTriangle size={13} className="text-indigo-600" />
+                                        <span>Escalate to Lead / RM</span>
+                                      </button>
+                                    </div>
+                                    <div className="py-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setOpenDropdownId(null);
+                                          setDeleteCandidateTarget(cand);
+                                        }}
+                                        className="w-full px-3 py-1.5 hover:bg-rose-50 flex items-center space-x-2 text-rose-600 font-medium cursor-pointer transition-colors"
+                                      >
+                                        <Trash2 size={13} className="text-rose-600" />
+                                        <span>Delete Candidate</span>
+                                      </button>
+                                    </div>
                                   </div>
-
-                                  <div className="py-1">
-                                    {/* Delete Candidate */}
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenDropdownId(null);
-                                        setDeleteCandidateTarget(cand);
-                                      }}
-                                      className="w-full px-3 py-1.5 hover:bg-rose-50 flex items-center space-x-2 text-rose-600 font-semibold cursor-pointer transition-colors"
-                                    >
-                                      <Trash2 size={13} />
-                                      <span>Delete Candidate</span>
-                                    </button>
-                                  </div>
-                                </div>
-                              </>
-                            )}
+                                </>
+                              )}
+                            </div>
                           </div>
                         </td>
                       </tr>
@@ -1209,34 +1268,14 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
 
       {/* Candidate Profile Detail Modal */}
       {selectedCandidateForDetail && (
-        <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-[10px] border border-[#E2E8F4] max-w-4xl w-full max-h-[90vh] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
-            <div className="px-6 py-4 border-b border-[#E2E8F4] flex items-center justify-between bg-slate-50/50">
-              <div className="flex items-center space-x-3">
-                <div className="w-8 h-8 rounded-full bg-[#1B3270]/10 text-[#1B3270] flex items-center justify-center font-bold text-xs">
-                  {selectedCandidateForDetail.first_name?.[0] || 'C'}
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-[#1B3270]">
-                    {selectedCandidateForDetail.first_name} {selectedCandidateForDetail.last_name}
-                  </h3>
-                  <span className="text-[11px] text-[#94A3B8]">
-                    {selectedCandidateForDetail.target_role || 'Healthcare Candidate'} • {selectedCandidateForDetail.email || 'No email registered'}
-                  </span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSelectedCandidateForDetail(null)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-[6px] hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="p-6 overflow-y-auto flex-1">
-              <CandidateProfileDetailView candidateId={selectedCandidateForDetail.id} />
-            </div>
+        <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+          <div className="bg-white rounded-[10px] border border-[#E2E8F4] max-w-5xl w-full h-[92vh] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
+            <SupplierCandidateDetailPanel
+              candidateId={selectedCandidateForDetail.id}
+              initialTab={selectedCandidateDefaultTab || 'profile'}
+              onClose={() => setSelectedCandidateForDetail(null)}
+              onCandidateUpdated={fetchInFlowCandidates}
+            />
           </div>
         </div>
       )}

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { formatTimeAgo } from '../../utils/formatters';
 import { getGateLabel } from '../../utils/labels';
+import { SupplierCandidateDetailPanel } from './components/SupplierCandidateDetailPanel';
 
 interface SupplierHomeTabProps {
   supplier: any;
@@ -28,9 +29,11 @@ interface CandidateAlert {
   id: string;
   candidateId: string;
   candidateName: string;
-  type: 'cooling' | 'locked' | 'rejected_docs';
+  type: 'cooling' | 'locked' | 'rejected_docs' | 'incomplete_profile' | 'missing_docs';
   alertText: string;
   candidate: any;
+  targetTab?: 'profile' | 'documents' | 'notes' | 'progress';
+  actionLabel?: string;
   coolingPeriod?: any;
   rejectedDocs?: any[];
 }
@@ -55,6 +58,7 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
   });
   const [candidateAlerts, setCandidateAlerts] = useState<CandidateAlert[]>([]);
   const [selectedAlertCandidate, setSelectedAlertCandidate] = useState<CandidateAlert | null>(null);
+  const [candidateDetailModal, setCandidateDetailModal] = useState<{ candidateId: string; tab?: 'profile' | 'documents' | 'notes' | 'progress' } | null>(null);
   const [recentMovements, setRecentMovements] = useState<any[]>([]);
   const [matchingJobsCount, setMatchingJobsCount] = useState<number>(0);
   const [loading, setLoading] = useState(true);
@@ -122,21 +126,68 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
       // B. Candidates with final_test_locked = true
       const lockedCandidates = cands.filter((c) => c.final_test_locked === true);
 
-      // C. Candidates with rejected documents
-      let rejectedDocs: any[] = [];
+      // C. Candidates with rejected or missing mandatory documents
+      let missingOrRejectedDocs: any[] = [];
       if (ids.length > 0) {
-        const { data: rDocs } = await supabase
+        const { data: mDocs } = await supabase
           .from('documents')
-          .select('id, candidate_id, document_type, document_label, status, rejection_reason')
+          .select('id, candidate_id, document_type, document_label, status, is_mandatory, rejection_reason')
           .in('candidate_id', ids)
-          .eq('status', 'rejected');
+          .eq('is_mandatory', true)
+          .in('status', ['not_uploaded', 'rejected']);
 
-        rejectedDocs = rDocs || [];
+        missingOrRejectedDocs = mDocs || [];
       }
 
       const alerts: CandidateAlert[] = [];
 
-      // Add cooling period alerts
+      // 1. Incomplete Profiles: candidates with profile_completion_pct < 100 in onboarding/in_progress
+      const incompleteCandidates = cands.filter(
+        (c) => (c.profile_completion_pct || 0) < 100 && (c.status === 'onboarding' || c.status === 'in_progress')
+      );
+
+      incompleteCandidates.forEach((cand) => {
+        const name = `${cand.first_name || ''} ${cand.last_name || ''}`.trim() || 'Candidate';
+        const pct = cand.profile_completion_pct || 0;
+        alerts.push({
+          id: `incomplete-${cand.id}`,
+          candidateId: cand.id,
+          candidateName: name,
+          type: 'incomplete_profile',
+          alertText: `${name} — profile ${pct}% complete`,
+          candidate: cand,
+          targetTab: 'profile',
+          actionLabel: 'Complete Profile',
+        });
+      });
+
+      // 2. Missing Documents: candidates with mandatory documents not_uploaded or rejected
+      const candMissingMap: Record<string, any[]> = {};
+      missingOrRejectedDocs.forEach((d) => {
+        if (!candMissingMap[d.candidate_id]) candMissingMap[d.candidate_id] = [];
+        candMissingMap[d.candidate_id].push(d);
+      });
+
+      Object.entries(candMissingMap).forEach(([candId, docs]) => {
+        const cand = candMap.get(candId);
+        if (cand) {
+          const name = `${cand.first_name || ''} ${cand.last_name || ''}`.trim() || 'Candidate';
+          const n = docs.length;
+          alerts.push({
+            id: `missing-docs-${cand.id}`,
+            candidateId: cand.id,
+            candidateName: name,
+            type: 'missing_docs',
+            alertText: `${name} — ${n} document${n === 1 ? '' : 's'} missing or rejected`,
+            candidate: cand,
+            targetTab: 'documents',
+            actionLabel: 'Upload Documents',
+            rejectedDocs: docs.filter((d) => d.status === 'rejected'),
+          });
+        }
+      });
+
+      // 3. Add cooling period alerts
       coolingList.forEach((cp) => {
         const cand = candMap.get(cp.candidate_id);
         if (cand) {
@@ -154,11 +205,13 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
             alertText: `DT cooling period active for ${name} — ends ${endDateFormatted}`,
             candidate: cand,
             coolingPeriod: cp,
+            targetTab: 'progress',
+            actionLabel: 'View Progress',
           });
         }
       });
 
-      // Add assessment lock alerts
+      // 4. Add assessment lock alerts
       lockedCandidates.forEach((cand) => {
         const name = `${cand.first_name || ''} ${cand.last_name || ''}`.trim() || 'Candidate';
         alerts.push({
@@ -168,31 +221,9 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
           type: 'locked',
           alertText: `${name}'s Final Assessment is locked — training required before retake`,
           candidate: cand,
+          targetTab: 'progress',
+          actionLabel: 'View Progress',
         });
-      });
-
-      // Add rejected documents alerts grouped by candidate
-      const candRejectedMap: Record<string, any[]> = {};
-      rejectedDocs.forEach((d) => {
-        if (!candRejectedMap[d.candidate_id]) candRejectedMap[d.candidate_id] = [];
-        candRejectedMap[d.candidate_id].push(d);
-      });
-
-      Object.entries(candRejectedMap).forEach(([candId, docs]) => {
-        const cand = candMap.get(candId);
-        if (cand) {
-          const name = `${cand.first_name || ''} ${cand.last_name || ''}`.trim() || 'Candidate';
-          const n = docs.length;
-          alerts.push({
-            id: `docs-${cand.id}`,
-            candidateId: cand.id,
-            candidateName: name,
-            type: 'rejected_docs',
-            alertText: `${name} has ${n} rejected document${n === 1 ? '' : 's'} — re-upload required`,
-            candidate: cand,
-            rejectedDocs: docs,
-          });
-        }
       });
 
       setCandidateAlerts(alerts);
@@ -608,10 +639,15 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => setSelectedAlertCandidate(alert)}
-                  className="px-3.5 py-1.5 bg-white border border-[#E2E8F4] hover:border-[#1B3270] text-[#1B3270] hover:text-[#1B3270] text-xs font-semibold rounded-[6px] transition-colors whitespace-nowrap self-start sm:self-auto shadow-2xs"
+                  onClick={() => {
+                    setCandidateDetailModal({
+                      candidateId: alert.candidateId,
+                      tab: alert.targetTab || (alert.type === 'rejected_docs' ? 'documents' : 'profile'),
+                    });
+                  }}
+                  className="px-3.5 py-1.5 bg-white border border-[#E2E8F4] hover:border-[#1B3270] text-[#1B3270] hover:text-[#1B3270] text-xs font-semibold rounded-[6px] transition-colors whitespace-nowrap self-start sm:self-auto shadow-2xs cursor-pointer"
                 >
-                  View Candidate
+                  {alert.actionLabel || 'View Candidate'}
                 </button>
               </div>
             ))}
@@ -713,7 +749,7 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
             </div>
           ) : (
             <div className="space-y-3">
-              {candidateAlerts.slice(0, 5).map((alert) => (
+              {candidateAlerts.slice(0, 8).map((alert) => (
                 <div
                   key={alert.id}
                   className="p-3.5 bg-[#EF4444]/5 border border-[#EF4444]/20 rounded-[6px] flex items-center justify-between gap-3 text-xs"
@@ -729,10 +765,15 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => setSelectedAlertCandidate(alert)}
-                    className="text-xs font-semibold text-[#2952A3] hover:underline whitespace-nowrap"
+                    onClick={() => {
+                      setCandidateDetailModal({
+                        candidateId: alert.candidateId,
+                        tab: alert.targetTab || (alert.type === 'rejected_docs' ? 'documents' : 'profile'),
+                      });
+                    }}
+                    className="text-xs font-semibold text-[#2952A3] hover:underline whitespace-nowrap cursor-pointer"
                   >
-                    View Details →
+                    {alert.actionLabel ? `${alert.actionLabel} →` : 'View Details →'}
                   </button>
                 </div>
               ))}
@@ -872,6 +913,20 @@ export const SupplierHomeTab: React.FC<SupplierHomeTabProps> = ({
                 View in Candidates Tab
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Supplier Candidate Detail Panel Modal */}
+      {candidateDetailModal && (
+        <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+          <div className="bg-white rounded-[10px] border border-[#E2E8F4] max-w-5xl w-full h-[92vh] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
+            <SupplierCandidateDetailPanel
+              candidateId={candidateDetailModal.candidateId}
+              initialTab={candidateDetailModal.tab || 'profile'}
+              onClose={() => setCandidateDetailModal(null)}
+              onCandidateUpdated={fetchHomeData}
+            />
           </div>
         </div>
       )}
