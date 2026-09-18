@@ -4,6 +4,7 @@ import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { getInternalDashboardPath } from '../../utils/internalRouting';
 import { AuthLayout } from '../../components/layout/AuthLayout';
+import { Eye, EyeOff, ShieldCheck } from 'lucide-react';
 
 export const InternalLogin: React.FC = () => {
   const navigate = useNavigate();
@@ -11,6 +12,7 @@ export const InternalLogin: React.FC = () => {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -92,6 +94,31 @@ export const InternalLogin: React.FC = () => {
         </p>
       }
     >
+      {/* Super Admin Credentials Helper */}
+      <div className="mb-4 p-3.5 bg-slate-50 border border-[#E2E8F4] rounded-[8px] text-xs">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center space-x-1.5 text-slate-800 font-semibold">
+            <ShieldCheck className="w-3.5 h-3.5 text-[#1B3270]" />
+            <span>Default Super Admin Credentials</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setEmail('admin@terratern.com');
+              setPassword('Admin@123456');
+              if (errorMessage) setErrorMessage(null);
+            }}
+            className="text-[11px] font-semibold text-[#1B3270] hover:text-[#2952A3] underline cursor-pointer"
+          >
+            Auto-fill
+          </button>
+        </div>
+        <div className="space-y-0.5 text-slate-600 font-mono text-[11px]">
+          <div>Email: <span className="text-slate-900 font-semibold">admin@terratern.com</span></div>
+          <div>Password: <span className="text-slate-900 font-semibold">Admin@123456</span></div>
+        </div>
+      </div>
+
       {/* Error Alert */}
       {errorMessage && (
         <div className="mb-4 text-[12px] text-[#EF4444] bg-[#FEF2F2] border border-[#EF4444]/20 rounded-[8px] p-2.5">
@@ -119,14 +146,24 @@ export const InternalLogin: React.FC = () => {
           <label className="block text-[12px] font-medium text-[#1B3270] mb-1.5">
             Password
           </label>
-          <input
-            type="password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-            className="w-full h-[44px] px-3.5 text-[14px] bg-white border-[1.5px] border-[#E2E8F4] rounded-[8px] text-[#1B3270] placeholder-[#94A3B8] outline-none transition-all duration-150 focus:border-[#1B3270] focus:ring-3 focus:ring-[#1B3270]/10"
-          />
+          <div className="relative">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full h-[44px] px-3.5 pr-10 text-[14px] bg-white border-[1.5px] border-[#E2E8F4] rounded-[8px] text-[#1B3270] placeholder-[#94A3B8] outline-none transition-all duration-150 focus:border-[#1B3270] focus:ring-3 focus:ring-[#1B3270]/10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              className="absolute inset-y-0 right-0 pr-3 flex items-center text-[#94A3B8] hover:text-[#4A5568] cursor-pointer"
+              tabIndex={-1}
+            >
+              {showPassword ? <EyeOff size={16} strokeWidth={1.5} /> : <Eye size={16} strokeWidth={1.5} />}
+            </button>
+          </div>
         </div>
 
         <button
