@@ -125,6 +125,15 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
       // 1. Generate random UUID for invite_token
       const inviteToken = crypto.randomUUID();
 
+      // Look up active RM for this supplier
+      const { data: activeRmAssign } = await supabase
+        .from('rm_assignments')
+        .select('rm_profile_id')
+        .eq('entity_type', 'supplier')
+        .eq('entity_id', supplier.id)
+        .eq('active', true)
+        .maybeSingle();
+
       // 2. Insert into candidates
       const { error: insertErr } = await supabase.from('candidates').insert({
         first_name: firstName.trim(),
@@ -132,6 +141,7 @@ export const SupplierPostTalentTab: React.FC<SupplierPostTalentTabProps> = ({
         email: email.trim().toLowerCase() || null,
         phone: phone.trim() || null,
         supplier_id: supplier.id,
+        assigned_rm_id: activeRmAssign?.rm_profile_id || null,
         status: 'onboarding',
         invite_token: inviteToken,
         target_role: roleInterest,

@@ -13,6 +13,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { formatDate } from '../../../../utils/formatters';
+import { syncSupplierCandidatesRm, assignDirectCandidateRm } from '../../../../utils/rmAssignmentUtils';
 
 interface AssignmentRequestNotification {
   id: string;
@@ -48,6 +49,19 @@ interface UnassignedEmployer {
   onboarding_checklist: any;
 }
 
+export interface UnassignedDirectCandidate {
+  id: string;
+  name: string;
+  first_name: string;
+  last_name: string;
+  status: string;
+  dt_status: string;
+  dt_passed: boolean;
+  created_at: string;
+  days_unassigned: number;
+  user_id?: string | null;
+}
+
 interface RmOption {
   id: string;
   name: string;
@@ -57,7 +71,7 @@ interface RmOption {
 
 export const LeadRmAssignmentQueueTab: React.FC = () => {
   const { user } = useAuth();
-  const [activeSection, setActiveSection] = useState<'suppliers' | 'employers'>('suppliers');
+  const [activeSection, setActiveSection] = useState<'suppliers' | 'employers' | 'direct_candidates'>('suppliers');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -68,6 +82,7 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
   // Suppliers & Employers data
   const [suppliers, setSuppliers] = useState<UnassignedSupplier[]>([]);
   const [employers, setEmployers] = useState<UnassignedEmployer[]>([]);
+  const [directCandidates, setDirectCandidates] = useState<UnassignedDirectCandidate[]>([]);
 
   // RM options
   const [candidateRms, setCandidateRms] = useState<RmOption[]>([]);
@@ -84,6 +99,11 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
   const [selectedEmployerRmId, setSelectedEmployerRmId] = useState('');
   const [employerAssignNotes, setEmployerAssignNotes] = useState('');
   const [assigningEmployer, setAssigningEmployer] = useState(false);
+
+  // Direct Candidate Assignment Modal
+  const [assignDirectCandidateModal, setAssignDirectCandidateModal] = useState<UnassignedDirectCandidate | null>(null);
+  const [selectedDirectCandidateRmId, setSelectedDirectCandidateRmId] = useState('');
+  const [assigningDirectCandidate, setAssigningDirectCandidate] = useState(false);
 
   // Toast
   const [toastMessage, setToastMessage] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
@@ -234,29 +254,66 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
         });
       setEmployers(unassignedEmps);
 
-      // 4. Fetch Candidate/Supplier RMs for assignment dropdown
+      // 4. Fetch Direct Candidates with no RM assigned
+      const { data: directCandsRes } = await supabase
+        .from('candidates')
+        .select(`
+          id,
+          first_name,
+          last_name,
+          status,
+          created_at,
+          dt_passed_at,
+          user_id,
+          dt_attempts (id, passed)
+        `)
+        .is('supplier_id', null)
+        .is('assigned_rm_id', null)
+        .neq('status', 'placed')
+        .order('created_at', { ascending: true });
+
+      const mappedDirectCands: UnassignedDirectCandidate[] = (directCandsRes || []).map((c: any) => {
+        const days = Math.max(0, Math.floor((now - new Date(c.created_at).getTime()) / (1000 * 60 * 60 * 24)));
+        const hasPassedDt = Boolean(c.dt_passed_at || (c.dt_attempts && c.dt_attempts.some((a: any) => a.passed)));
+        return {
+          id: c.id,
+          name: `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Direct Candidate',
+          first_name: c.first_name || '',
+          last_name: c.last_name || '',
+          status: c.status || 'onboarding',
+          dt_status: hasPassedDt ? 'Passed' : 'Pending',
+          dt_passed: hasPassedDt,
+          created_at: c.created_at,
+          days_unassigned: days,
+          user_id: c.user_id,
+        };
+      });
+      setDirectCandidates(mappedDirectCands);
+
+      // 5. Fetch Candidate/Supplier RMs for assignment dropdown
       const { data: csRms } = await supabase
         .from('profiles')
         .select('id, first_name, last_name, email')
         .eq('internal_role', 'candidate_supplier_rm')
         .eq('is_internal', true);
 
-      const { data: allSupAssignments } = await supabase
-        .from('rm_assignments')
-        .select('rm_profile_id')
-        .eq('entity_type', 'supplier')
-        .eq('active', true);
+      const { data: allAssignedCands } = await supabase
+        .from('candidates')
+        .select('assigned_rm_id')
+        .not('assigned_rm_id', 'is', null);
 
-      const supCountMap: Record<string, number> = {};
-      (allSupAssignments || []).forEach((a) => {
-        supCountMap[a.rm_profile_id] = (supCountMap[a.rm_profile_id] || 0) + 1;
+      const candCountMap: Record<string, number> = {};
+      (allAssignedCands || []).forEach((c) => {
+        if (c.assigned_rm_id) {
+          candCountMap[c.assigned_rm_id] = (candCountMap[c.assigned_rm_id] || 0) + 1;
+        }
       });
 
       const formattedCsRms: RmOption[] = (csRms || []).map((r) => ({
         id: r.id,
         name: `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.email,
         email: r.email,
-        activeAccountsCount: supCountMap[r.id] || 0,
+        activeAccountsCount: candCountMap[r.id] || 0,
       }));
       setCandidateRms(formattedCsRms);
 
@@ -376,6 +433,15 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
         await supabase.from('notifications').insert(notifPayload);
       }
 
+      // 5. Auto-assign existing unassigned candidates of this supplier to the new RM
+      await syncSupplierCandidatesRm(
+        supabase,
+        assignSupplierModal.id,
+        selectedSupplierRmId,
+        false,
+        user.id
+      );
+
       showToast(`${assignSupplierModal.company_name} assigned to ${rmName}.`);
       setSuppliers((prev) => prev.filter((s) => s.id !== assignSupplierModal.id));
       setAssignModalSupplier(null);
@@ -386,6 +452,31 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
       showToast(err.message || 'Failed to assign account manager.', 'error');
     } finally {
       setAssigningSupplier(false);
+    }
+  };
+
+  const handleAssignDirectCandidate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignDirectCandidateModal || !selectedDirectCandidateRmId || !user) return;
+
+    try {
+      setAssigningDirectCandidate(true);
+      const { rmName, candidateName } = await assignDirectCandidateRm(
+        supabase,
+        assignDirectCandidateModal.id,
+        selectedDirectCandidateRmId,
+        user.id
+      );
+
+      showToast(`${candidateName} assigned to ${rmName}.`);
+      setDirectCandidates((prev) => prev.filter((c) => c.id !== assignDirectCandidateModal.id));
+      setAssignDirectCandidateModal(null);
+      setSelectedDirectCandidateRmId('');
+    } catch (err: any) {
+      console.error('Error assigning direct candidate RM:', err);
+      showToast(err.message || 'Failed to assign account manager.', 'error');
+    } finally {
+      setAssigningDirectCandidate(false);
     }
   };
 
@@ -602,6 +693,18 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
             <Building2 className="w-4 h-4" />
             <span>Employers ({employers.length})</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('direct_candidates')}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center space-x-2 cursor-pointer ${
+              activeSection === 'direct_candidates'
+                ? 'bg-[#1B3270] text-white shadow-2xs'
+                : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            <span>Direct Candidates ({directCandidates.length})</span>
+          </button>
         </div>
 
         {/* Search */}
@@ -609,7 +712,13 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
           <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder={activeSection === 'suppliers' ? 'Search suppliers...' : 'Search employers...'}
+            placeholder={
+              activeSection === 'suppliers'
+                ? 'Search suppliers...'
+                : activeSection === 'employers'
+                ? 'Search employers...'
+                : 'Search direct candidates...'
+            }
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-[#1B3270] focus:border-[#1B3270]"
@@ -791,6 +900,190 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
         </div>
       )}
 
+      {/* CONTENT: DIRECT CANDIDATES */}
+      {activeSection === 'direct_candidates' && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+          {loading ? (
+            <div className="p-12 flex flex-col items-center justify-center text-slate-400">
+              <Loader2 className="w-6 h-6 animate-spin mb-2" />
+              <p className="text-xs">Loading direct candidates queue...</p>
+            </div>
+          ) : directCandidates.length === 0 ? (
+            <div className="p-12 text-center text-slate-500">
+              <div className="w-12 h-12 bg-slate-50 text-slate-400 rounded-full flex items-center justify-center mx-auto mb-3">
+                <CheckCircle2 className="w-6 h-6 text-emerald-500" />
+              </div>
+              <h3 className="text-sm font-semibold text-slate-800">
+                All direct candidates assigned
+              </h3>
+              <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                No direct candidates are currently awaiting an account manager.
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider text-[11px] font-semibold">
+                  <tr>
+                    <th className="py-3.5 px-4">Name</th>
+                    <th className="py-3.5 px-4">Status</th>
+                    <th className="py-3.5 px-4">DT Status</th>
+                    <th className="py-3.5 px-4">Created</th>
+                    <th className="py-3.5 px-4">Days Unassigned</th>
+                    <th className="py-3.5 px-4 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-600">
+                  {directCandidates
+                    .filter((c) =>
+                      searchQuery.trim()
+                        ? c.name.toLowerCase().includes(searchQuery.toLowerCase())
+                        : true
+                    )
+                    .map((cand) => {
+                      const isOverdue = cand.days_unassigned > 3 && cand.dt_passed;
+                      const isUrgent = cand.days_unassigned > 7;
+
+                      return (
+                        <tr key={cand.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-3.5 px-4 font-semibold text-slate-900">
+                            <div>{cand.name}</div>
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              ID: {cand.id.slice(0, 8)}...
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700 capitalize">
+                              {cand.status}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            {cand.dt_passed ? (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                Passed
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600">
+                                Pending
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-500 whitespace-nowrap">
+                            {formatDate(cand.created_at)}
+                          </td>
+                          <td className="py-3.5 px-4 whitespace-nowrap">
+                            <div className="flex items-center space-x-1.5">
+                              <span>{cand.days_unassigned} day{cand.days_unassigned === 1 ? '' : 's'}</span>
+                              {isUrgent ? (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                  Urgent
+                                </span>
+                              ) : isOverdue ? (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                  Overdue
+                                </span>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAssignDirectCandidateModal(cand);
+                                if (candidateRms.length > 0) {
+                                  setSelectedDirectCandidateRmId(candidateRms[0].id);
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-[#1B3270] hover:bg-[#152758] text-white font-medium rounded-lg text-xs shadow-2xs transition-colors cursor-pointer"
+                            >
+                              Assign RM
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ASSIGN DIRECT CANDIDATE RM MODAL */}
+      {assignDirectCandidateModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Assign Account Manager
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {assignDirectCandidateModal.name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAssignDirectCandidateModal(null)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAssignDirectCandidate} className="p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Select Account Manager *
+                </label>
+                {candidateRms.length === 0 ? (
+                  <p className="text-xs text-rose-600">
+                    No active Candidate / Supplier RMs found. Ensure staff profiles exist.
+                  </p>
+                ) : (
+                  <select
+                    value={selectedDirectCandidateRmId}
+                    onChange={(e) => setSelectedDirectCandidateRmId(e.target.value)}
+                    required
+                    className="w-full text-xs border border-slate-200 rounded-lg p-2.5 bg-white text-slate-800 focus:outline-none focus:ring-1 focus:ring-[#1B3270]"
+                  >
+                    {candidateRms.map((rm) => (
+                      <option key={rm.id} value={rm.id}>
+                        {rm.name} — {rm.activeAccountsCount} active candidates
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="pt-2 flex items-center justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setAssignDirectCandidateModal(null)}
+                  className="px-3.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={assigningDirectCandidate || !selectedDirectCandidateRmId}
+                  className="px-4 py-2 bg-[#1B3270] hover:bg-[#152758] disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-2xs flex items-center space-x-1.5 cursor-pointer"
+                >
+                  {assigningDirectCandidate ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Assigning...</span>
+                    </>
+                  ) : (
+                    <span>Assign & Notify</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* ASSIGN SUPPLIER RM MODAL */}
       {assignSupplierModal && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
@@ -820,7 +1113,7 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
                 </label>
                 {candidateRms.length === 0 ? (
                   <p className="text-xs text-rose-600">
-                    No active Candidate / Supplier RMs found. Please ensure staff profiles exist.
+                    No active Candidate / Supplier RMs found. Ensure staff profiles exist.
                   </p>
                 ) : (
                   <select
@@ -831,7 +1124,7 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
                   >
                     {candidateRms.map((rm) => (
                       <option key={rm.id} value={rm.id}>
-                        {rm.name} ({rm.activeAccountsCount} active suppliers)
+                        {rm.name} ({rm.activeAccountsCount} active candidates)
                       </option>
                     ))}
                   </select>
@@ -908,7 +1201,7 @@ export const LeadRmAssignmentQueueTab: React.FC = () => {
                 </label>
                 {employerRms.length === 0 ? (
                   <p className="text-xs text-rose-600">
-                    No active Employer RMs found. Please ensure staff profiles exist.
+                    No active Employer RMs found. Ensure staff profiles exist.
                   </p>
                 ) : (
                   <select

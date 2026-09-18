@@ -21,9 +21,11 @@ import {
   GraduationCap,
 } from 'lucide-react';
 import { getGateLabel, getCandidateStatusLabel } from '../../../utils/labels';
+import { formatDate } from '../../../utils/formatters';
 import { CandidateProfileDetailView } from '../components/CandidateProfileDetailView';
 import { MultiSelectFilter } from '../../../components/ui/MultiSelectFilter';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
+import { assignDirectCandidateRm } from '../../../utils/rmAssignmentUtils';
 
 interface CandidateRow {
   id: string;
@@ -40,6 +42,9 @@ interface CandidateRow {
   user_email?: string;
   user_phone?: string;
   current_gate?: string;
+  assigned_rm_id?: string | null;
+  assigned_rm_name?: string;
+  assigned_rm_email?: string;
   // Updates
   dt_attempt_count: number;
   is_cooling: boolean;
@@ -151,6 +156,13 @@ export const CandidatesTab: React.FC = () => {
   const [cohortFilter, setCohortFilter] = useState('all');
   const [dtStatusFilter, setDtStatusFilter] = useState('all'); // all | passed | failed | cooling_active | attempt_limit_reached
   const [finalTestFilter, setFinalTestFilter] = useState('all'); // all | passed | failed | locked | not_started
+  const [rmFilter, setRmFilter] = useState<string[]>([]);
+  const [rmOptions, setRmOptions] = useState<{ id: string; name: string; email: string; activeCandidatesCount: number }[]>([]);
+
+  // Direct Candidate Assignment Modal
+  const [assignModalCandidate, setAssignModalCandidate] = useState<CandidateRow | null>(null);
+  const [selectedAssignRmId, setSelectedAssignRmId] = useState('');
+  const [assigningRm, setAssigningRm] = useState(false);
 
   // Selected candidate detail panel
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateRow | null>(null);
@@ -262,7 +274,14 @@ export const CandidatesTab: React.FC = () => {
         }
       });
 
-      // 4. Fetch candidates with supplier & profile joins
+      // 4. Fetch Candidate/Supplier RMs for filter & options
+      const { data: rms } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name, email')
+        .eq('internal_role', 'candidate_supplier_rm')
+        .eq('is_internal', true);
+
+      // 5. Fetch candidates with supplier & profile joins
       const { data: cands, error } = await supabase
         .from('candidates')
         .select(`
@@ -274,6 +293,7 @@ export const CandidatesTab: React.FC = () => {
           created_at,
           user_id,
           supplier_id,
+          assigned_rm_id,
           language_level_self_reported,
           nationality,
           dt_attempt_count,
@@ -290,7 +310,24 @@ export const CandidatesTab: React.FC = () => {
 
       if (error) throw error;
 
-      // 5. Fetch latest gate result for each candidate
+      // Count active candidates per RM
+      const candCountMap: Record<string, number> = {};
+      (cands || []).forEach((c: any) => {
+        if (c.assigned_rm_id) {
+          candCountMap[c.assigned_rm_id] = (candCountMap[c.assigned_rm_id] || 0) + 1;
+        }
+      });
+
+      const formattedRms = (rms || []).map((r) => ({
+        id: r.id,
+        name: `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.email,
+        email: r.email,
+        activeCandidatesCount: candCountMap[r.id] || 0,
+      }));
+      setRmOptions(formattedRms);
+      const rmMap = new Map(formattedRms.map((r) => [r.id, r]));
+
+      // 6. Fetch latest gate result for each candidate
       const { data: gates } = await supabase
         .from('gate_results')
         .select('candidate_id, gate_type, created_at')
@@ -307,6 +344,7 @@ export const CandidatesTab: React.FC = () => {
 
       const rows: CandidateRow[] = (cands || []).map((c: any) => {
         const cool = coolingMap[c.id];
+        const rm = c.assigned_rm_id ? rmMap.get(c.assigned_rm_id) : undefined;
         return {
           id: c.id,
           first_name: c.first_name,
@@ -316,6 +354,9 @@ export const CandidatesTab: React.FC = () => {
           created_at: c.created_at,
           user_id: c.user_id,
           supplier_id: c.supplier_id,
+          assigned_rm_id: c.assigned_rm_id || null,
+          assigned_rm_name: rm?.name,
+          assigned_rm_email: rm?.email,
           language_level_self_reported: c.language_level_self_reported,
           nationality: c.nationality,
           dt_attempt_count: c.dt_attempt_count || 0,
@@ -411,6 +452,15 @@ export const CandidatesTab: React.FC = () => {
         }
       }
 
+      // RM Assigned filter
+      if (rmFilter.length > 0) {
+        const matchesRm = rmFilter.some((rf) => {
+          if (rf === 'unassigned') return !c.assigned_rm_id;
+          return c.assigned_rm_id === rf || c.assigned_rm_name === rf;
+        });
+        if (!matchesRm) return false;
+      }
+
       return true;
     });
   }, [
@@ -422,6 +472,7 @@ export const CandidatesTab: React.FC = () => {
     cohortFilter,
     dtStatusFilter,
     finalTestFilter,
+    rmFilter,
   ]);
 
   // Load full candidate detail panel
@@ -1155,6 +1206,17 @@ export const CandidatesTab: React.FC = () => {
             selectedValues={supplierFilter}
             onChange={setSupplierFilter}
           />
+
+          {/* RM Assigned filter (Multi-select) */}
+          <MultiSelectFilter
+            label="RM Assigned"
+            options={[
+              { value: 'unassigned', label: 'Unassigned' },
+              ...rmOptions.map((rm) => ({ value: rm.id, label: rm.name })),
+            ]}
+            selectedValues={rmFilter}
+            onChange={setRmFilter}
+          />
         </div>
 
         {/* SECOND ROW OF FILTERS: Cohort, DT Status, Final Test */}
@@ -1242,6 +1304,7 @@ export const CandidatesTab: React.FC = () => {
                   <th className="py-3.5 px-4">Cohort</th>
                   <th className="py-3.5 px-4 text-center">Can Apply</th>
                   <th className="py-3.5 px-4">Supplier</th>
+                  <th className="py-3.5 px-4">RM Assigned</th>
                   <th className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
               </thead>
@@ -1314,6 +1377,21 @@ export const CandidatesTab: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-4 text-slate-600 truncate max-w-[120px]">
                         {cand.supplier_name}
+                      </td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {cand.assigned_rm_name ? (
+                          <span className="text-slate-600 text-[12px] font-medium">
+                            {cand.assigned_rm_name}
+                          </span>
+                        ) : cand.supplier_id ? (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                            Pending — via supplier
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                            Unassigned
+                          </span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="relative inline-block text-left">
@@ -1424,6 +1502,81 @@ export const CandidatesTab: React.FC = () => {
                   <span>{overrideSuccessMessage}</span>
                 </div>
               )}
+
+              {/* SECTION: Account Manager */}
+              <div className="space-y-2">
+                <h3 className="font-bold text-[#1B3270] text-sm flex items-center space-x-1.5">
+                  <UserCheck className="w-4 h-4 text-[#2952A3]" />
+                  <span>Account Manager</span>
+                </h3>
+
+                {selectedCandidate.assigned_rm_id ? (
+                  // White card, green left border:
+                  <div className="bg-white border border-[#E2E8F4] border-l-4 border-l-emerald-500 rounded-[8px] p-4 shadow-2xs flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-slate-900 text-xs">
+                        Assigned RM: {selectedCandidate.assigned_rm_name || 'Assigned RM'}
+                      </p>
+                      {selectedCandidate.assigned_rm_email && (
+                        <p className="text-[11px] text-slate-500 mt-0.5 font-mono">
+                          {selectedCandidate.assigned_rm_email}
+                        </p>
+                      )}
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Assigned since: {formatDate(selectedCandidate.created_at)}
+                      </p>
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAssignModalCandidate(selectedCandidate);
+                          if (rmOptions.length > 0) {
+                            setSelectedAssignRmId(selectedCandidate.assigned_rm_id || rmOptions[0].id);
+                          }
+                        }}
+                        className="text-xs font-semibold text-[#1B3270] hover:text-[#2952A3] hover:underline cursor-pointer"
+                      >
+                        Reassign
+                      </button>
+                    </div>
+                  </div>
+                ) : !selectedCandidate.supplier_id ? (
+                  // Amber card: No account manager assigned (Direct candidate)
+                  <div className="bg-amber-50/80 border border-amber-200 rounded-[8px] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <p className="font-bold text-amber-900 text-xs">
+                        No account manager assigned.
+                      </p>
+                      <p className="text-[11px] text-amber-700 mt-0.5">
+                        This direct candidate requires a dedicated Relationship Manager.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAssignModalCandidate(selectedCandidate);
+                        if (rmOptions.length > 0) {
+                          setSelectedAssignRmId(rmOptions[0].id);
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold rounded-[6px] shadow-2xs cursor-pointer whitespace-nowrap transition-colors"
+                    >
+                      Assign Account Manager
+                    </button>
+                  </div>
+                ) : (
+                  // Info card: Belongs to supplier
+                  <div className="bg-slate-50 border border-slate-200 rounded-[8px] p-4 text-xs text-slate-600">
+                    <p className="font-semibold text-slate-800">
+                      This candidate belongs to {selectedCandidate.supplier_name}.
+                    </p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Their RM will be assigned when the supplier's account manager is set.
+                    </p>
+                  </div>
+                )}
+              </div>
 
               {/* SECTION: Super Admin Editable Profile Fields */}
               <div className="bg-[#F8FAFD] border border-[#E2E8F4] rounded-[8px] p-4 space-y-4">
@@ -2238,6 +2391,117 @@ export const CandidatesTab: React.FC = () => {
                     </>
                   ) : (
                     <span>Submit Gate Override</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ASSIGN DIRECT CANDIDATE RM MODAL (SUPER ADMIN) */}
+      {assignModalCandidate && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Assign Account Manager
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {assignModalCandidate.first_name} {assignModalCandidate.last_name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAssignModalCandidate(null)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!assignModalCandidate || !selectedAssignRmId || !user) return;
+                try {
+                  setAssigningRm(true);
+                  const { rmName, candidateName } = await assignDirectCandidateRm(
+                    supabase,
+                    assignModalCandidate.id,
+                    selectedAssignRmId,
+                    user.id
+                  );
+                  showToast(`${candidateName} assigned to ${rmName}.`);
+                  setCandidates((prev) =>
+                    prev.map((c) =>
+                      c.id === assignModalCandidate.id
+                        ? { ...c, assigned_rm_id: selectedAssignRmId, assigned_rm_name: rmName }
+                        : c
+                    )
+                  );
+                  if (selectedCandidate?.id === assignModalCandidate.id) {
+                    setSelectedCandidate((prev) =>
+                      prev
+                        ? { ...prev, assigned_rm_id: selectedAssignRmId, assigned_rm_name: rmName }
+                        : null
+                    );
+                  }
+                  setAssignModalCandidate(null);
+                } catch (err: any) {
+                  console.error('Error assigning candidate RM:', err);
+                  alert(`Failed to assign account manager: ${err.message}`);
+                } finally {
+                  setAssigningRm(false);
+                }
+              }}
+              className="p-5 space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Select Account Manager *
+                </label>
+                {rmOptions.length === 0 ? (
+                  <p className="text-xs text-rose-600">
+                    No active Candidate / Supplier RMs found. Ensure staff profiles exist.
+                  </p>
+                ) : (
+                  <select
+                    value={selectedAssignRmId}
+                    onChange={(e) => setSelectedAssignRmId(e.target.value)}
+                    required
+                    className="w-full text-xs border border-slate-200 rounded-lg p-2.5 bg-white text-slate-800 focus:outline-none focus:ring-1 focus:ring-[#1B3270]"
+                  >
+                    {rmOptions.map((rm) => (
+                      <option key={rm.id} value={rm.id}>
+                        {rm.name} — {rm.activeCandidatesCount} active candidates
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="pt-2 flex items-center justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setAssignModalCandidate(null)}
+                  className="px-3.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={assigningRm || !selectedAssignRmId}
+                  className="px-4 py-2 bg-[#1B3270] hover:bg-[#152758] disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-2xs flex items-center space-x-1.5 cursor-pointer"
+                >
+                  {assigningRm ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Assigning...</span>
+                    </>
+                  ) : (
+                    <span>Assign & Notify</span>
                   )}
                 </button>
               </div>

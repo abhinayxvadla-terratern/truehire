@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { Check, ArrowRight, Bell, Briefcase, MapPin, AlertTriangle } from 'lucide-react';
+import { Check, ArrowRight, Bell, Briefcase, MapPin, AlertTriangle, UserCheck, Mail, MessageSquare, X, Loader2 } from 'lucide-react';
 import { formatTimeAgo } from '../../utils/formatters';
 import { getApplicationStatusLabel } from '../../utils/labels';
 
@@ -23,6 +23,27 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   const [activeJobs, setActiveJobs] = useState<any[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Assigned Account Manager (RM)
+  const [assignedRm, setAssignedRm] = useState<{
+    id: string;
+    first_name: string;
+    last_name: string;
+    name: string;
+    email: string;
+  } | null>(null);
+
+  // Get Help Modal
+  const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
+  const [helpTopic, setHelpTopic] = useState('Qualification Gates');
+  const [helpMessage, setHelpMessage] = useState('');
+  const [sendingHelp, setSendingHelp] = useState(false);
+  const [helpToast, setHelpToast] = useState<string | null>(null);
+
+  const showHelpToast = (msg: string) => {
+    setHelpToast(msg);
+    setTimeout(() => setHelpToast(null), 4000);
+  };
 
   const fetchHomeData = async () => {
     if (!candidate?.id || !user?.id) {
@@ -97,6 +118,43 @@ export const HomeTab: React.FC<HomeTabProps> = ({
 
       if (notifsErr) console.error('Error fetching notifications:', notifsErr);
       else setNotifications(notifs || []);
+
+      // 6. Fetch assigned Account Manager (RM) profile
+      let rmId = candidate?.assigned_rm_id;
+      if (!rmId) {
+        const { data: candDb } = await supabase
+          .from('candidates')
+          .select('assigned_rm_id')
+          .eq('id', candidate.id)
+          .maybeSingle();
+        rmId = candDb?.assigned_rm_id;
+      }
+
+      if (rmId) {
+        const { data: rmData, error: rmErr } = await supabase
+          .from('profiles')
+          .select('id, first_name, last_name, email')
+          .eq('id', rmId)
+          .maybeSingle();
+
+        if (rmErr) {
+          console.error('Error fetching assigned RM profile:', rmErr);
+          setAssignedRm(null);
+        } else if (rmData) {
+          const rmName = `${rmData.first_name || ''} ${rmData.last_name || ''}`.trim() || rmData.email;
+          setAssignedRm({
+            id: rmData.id,
+            first_name: rmData.first_name || '',
+            last_name: rmData.last_name || '',
+            name: rmName,
+            email: rmData.email,
+          });
+        } else {
+          setAssignedRm(null);
+        }
+      } else {
+        setAssignedRm(null);
+      }
     } catch (err) {
       console.error('Error loading home tab data:', err);
     } finally {
@@ -125,6 +183,64 @@ export const HomeTab: React.FC<HomeTabProps> = ({
       );
     } catch (err) {
       console.error('Error marking notification read:', err);
+    }
+  };
+
+  const handleSendHelpRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignedRm || !user || !candidate || !helpMessage.trim()) return;
+
+    try {
+      setSendingHelp(true);
+      const candName = `${candidate.first_name || ''} ${candidate.last_name || ''}`.trim() || 'Candidate';
+
+      // 1. Create RM notification: 'Candidate Needs Help'
+      const { error: rmNotifErr } = await supabase
+        .from('notifications')
+        .insert({
+          user_id: assignedRm.id,
+          title: 'Candidate Needs Help',
+          message: `${candName} — needs help: ${helpTopic}\n\n${helpMessage.trim()}`,
+          type: 'general',
+          read: false,
+        });
+
+      if (rmNotifErr) throw rmNotifErr;
+
+      // 2. Create Candidate confirmation notification: 'Help Request Sent'
+      const { error: candNotifErr } = await supabase
+        .from('notifications')
+        .insert({
+          user_id: user.id,
+          title: 'Help Request Sent',
+          message: `Your request regarding "${helpTopic}" has been delivered to your Account Manager (${assignedRm.name}). They will review and respond shortly.`,
+          type: 'general',
+          read: false,
+        });
+
+      if (candNotifErr) {
+        console.error('Error creating candidate confirmation notification:', candNotifErr);
+      }
+
+      showHelpToast(`Help request submitted to ${assignedRm.name}.`);
+      setIsHelpModalOpen(false);
+      setHelpMessage('');
+      setHelpTopic('Qualification Gates');
+
+      // Refresh notifications list
+      const { data: updatedNotifs } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (updatedNotifs) setNotifications(updatedNotifs);
+    } catch (err: any) {
+      console.error('Error sending help request:', err);
+      showHelpToast(err.message || 'Failed to submit help request.');
+    } finally {
+      setSendingHelp(false);
     }
   };
 
@@ -389,6 +505,38 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             </button>
           </div>
         </div>
+
+        {/* YOUR ACCOUNT MANAGER CARD */}
+        {assignedRm && (
+          <div className="bg-white border border-[#E2E8F4] rounded-[12px] p-6 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start sm:items-center space-x-4">
+              <div className="w-12 h-12 rounded-xl bg-[#1B3270]/10 flex items-center justify-center text-[#1B3270] shrink-0">
+                <UserCheck className="w-6 h-6" />
+              </div>
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Your Account Manager
+                </div>
+                <h3 className="text-base font-bold text-slate-900 truncate">
+                  {assignedRm.name}
+                </h3>
+                <div className="flex items-center text-xs text-slate-500 space-x-1.5 truncate">
+                  <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span className="truncate">{assignedRm.email}</span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsHelpModalOpen(true)}
+              className="h-10 px-5 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold rounded-[8px] transition-colors cursor-pointer inline-flex items-center justify-center space-x-2 shadow-xs shrink-0 self-start sm:self-auto"
+            >
+              <MessageSquare className="w-4 h-4" />
+              <span>Get Help</span>
+            </button>
+          </div>
+        )}
 
         {/* 3. OPEN ROLES PREVIEW & 4. NOTIFICATIONS */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
@@ -672,6 +820,106 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           )}
         </div>
       </div>
+
+      {/* CONTACT YOUR ACCOUNT MANAGER MODAL */}
+      {isHelpModalOpen && assignedRm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white border border-[#E2E8F4] rounded-[12px] shadow-xl max-w-md w-full p-6 relative animate-in zoom-in-95 duration-150">
+            <button
+              type="button"
+              onClick={() => setIsHelpModalOpen(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center space-x-2.5 mb-1">
+              <div className="w-8 h-8 rounded-lg bg-[#1B3270]/10 text-[#1B3270] flex items-center justify-center shrink-0">
+                <UserCheck className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Contact Your Account Manager
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Direct message to {assignedRm.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 mt-2 mb-4">
+              Select what you need assistance with and write your message below. Your Account Manager will review and follow up with you.
+            </p>
+
+            <form onSubmit={handleSendHelpRequest} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Topic *
+                </label>
+                <select
+                  value={helpTopic}
+                  onChange={(e) => setHelpTopic(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-white border border-[#E2E8F4] rounded-[6px] text-slate-900 font-medium outline-none focus:border-[#1B3270] focus:ring-1 focus:ring-[#1B3270]"
+                >
+                  <option value="Qualification Gates">Qualification Gates</option>
+                  <option value="Document Verification">Document Verification</option>
+                  <option value="Speaking Test & Mentorship">Speaking Test & Mentorship</option>
+                  <option value="German Language Bootcamp">German Language Bootcamp</option>
+                  <option value="Final Assessment">Final Assessment</option>
+                  <option value="Job Applications & Interviews">Job Applications & Interviews</option>
+                  <option value="General Inquiry">General Inquiry</option>
+                </select>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                    Message *
+                  </label>
+                  <span className={`text-[11px] font-mono ${helpMessage.length > 280 ? 'text-amber-600 font-semibold' : 'text-slate-400'}`}>
+                    {helpMessage.length}/300
+                  </span>
+                </div>
+                <textarea
+                  required
+                  rows={4}
+                  maxLength={300}
+                  value={helpMessage}
+                  onChange={(e) => setHelpMessage(e.target.value)}
+                  placeholder="Describe your question or what you need help with..."
+                  className="w-full p-2.5 text-xs border border-[#E2E8F4] rounded-[6px] focus:outline-none focus:ring-1 focus:ring-[#1B3270] text-slate-800 resize-none"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2.5 pt-2 border-t border-[#E2E8F4]">
+                <button
+                  type="button"
+                  onClick={() => setIsHelpModalOpen(false)}
+                  className="px-4 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={sendingHelp || !helpMessage.trim()}
+                  className="px-4 py-2 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold rounded-[6px] transition-colors disabled:opacity-50 flex items-center space-x-1.5 cursor-pointer shadow-2xs"
+                >
+                  {sendingHelp && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />}
+                  <span>Send Request</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* HELP TOAST */}
+      {helpToast && (
+        <div className="fixed bottom-6 right-6 z-50 bg-[#1B3270] text-white px-4 py-2.5 rounded-[8px] shadow-lg text-xs font-medium flex items-center space-x-2 animate-in fade-in slide-in-from-bottom-2">
+          <Check className="w-4 h-4 text-emerald-400" />
+          <span>{helpToast}</span>
+        </div>
+      )}
     </div>
   );
 };

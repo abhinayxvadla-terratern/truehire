@@ -21,6 +21,7 @@ import { getGateLabel, getCandidateStatusLabel } from '../../../utils/labels';
 import { CandidateProfileDetailView } from '../components/CandidateProfileDetailView';
 import { MultiSelectFilter } from '../../../components/ui/MultiSelectFilter';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
+import { syncSupplierCandidatesRm } from '../../../utils/rmAssignmentUtils';
 
 interface SupplierRow {
   id: string;
@@ -669,6 +670,16 @@ export const SuppliersTab: React.FC<SuppliersTabProps> = ({
         updatedRmName = assignedRm
           ? `${assignedRm.first_name} ${assignedRm.last_name}`.trim() || assignedRm.email
           : 'Assigned RM';
+
+        // Auto-assign or reassign supplier candidates
+        const isReassignment = Boolean(selectedSupplier.rm_profile_id && selectedSupplier.rm_profile_id !== selectedAssignRmId);
+        await syncSupplierCandidatesRm(
+          supabase,
+          selectedSupplier.id,
+          selectedAssignRmId,
+          isReassignment,
+          user.id
+        );
       }
 
       const updated = {

@@ -25,6 +25,7 @@ import { ALL_DOCUMENT_TYPES } from '../../../../utils/documentTypes';
 interface ActionItem {
   id: string;
   type:
+    | 'candidate_help'
     | 'speaking_test'
     | 'doc_rejected'
     | 'st_pending'
@@ -76,6 +77,8 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
   // 4 Stats
   const [mySuppliersCount, setMySuppliersCount] = useState(0);
   const [totalCandidatesCount, setTotalCandidatesCount] = useState(0);
+  const [supplierCandidatesCount, setSupplierCandidatesCount] = useState(0);
+  const [directCandidatesCount, setDirectCandidatesCount] = useState(0);
   const [stuckCount, setStuckCount] = useState(0);
   const [interviewReadyCount, setInterviewReadyCount] = useState(0);
 
@@ -119,23 +122,10 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
       const supplierIds = (assignments || [])
         .filter((a) => a.entity_type === 'supplier')
         .map((a) => a.entity_id);
-      const directCandidateIds = (assignments || [])
-        .filter((a) => a.entity_type === 'candidate')
-        .map((a) => a.entity_id);
 
       setMySuppliersCount(supplierIds.length);
 
-      if (supplierIds.length === 0 && directCandidateIds.length === 0) {
-        setTotalCandidatesCount(0);
-        setStuckCount(0);
-        setInterviewReadyCount(0);
-        setActionItems([]);
-        setSpeakingRequests([]);
-        setAwaitingReviewCandidates([]);
-        return;
-      }
-
-      // 2. Fetch candidates belonging to these suppliers or directly assigned
+      // 2. Fetch candidates assigned directly to this RM or belonging to assigned suppliers
       let candQuery = supabase
         .from('candidates')
         .select(`
@@ -147,6 +137,7 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
           language_level_self_reported,
           status,
           supplier_id,
+          assigned_rm_id,
           profile_completion_pct,
           dt_passed_at,
           dt_attempt_count,
@@ -155,12 +146,10 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
           suppliers:supplier_id (id, company_name, user_id)
         `);
 
-      if (supplierIds.length > 0 && directCandidateIds.length > 0) {
-        candQuery = candQuery.or(`supplier_id.in.(${supplierIds.join(',')}),id.in.(${directCandidateIds.join(',')})`);
-      } else if (supplierIds.length > 0) {
-        candQuery = candQuery.in('supplier_id', supplierIds);
+      if (supplierIds.length > 0) {
+        candQuery = candQuery.or(`assigned_rm_id.eq.${user.id},supplier_id.in.(${supplierIds.join(',')})`);
       } else {
-        candQuery = candQuery.in('id', directCandidateIds);
+        candQuery = candQuery.eq('assigned_rm_id', user.id);
       }
 
       const { data: cands, error: candsErr } = await candQuery;
@@ -168,6 +157,11 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
       if (candsErr) throw candsErr;
       const candidateList = cands || [];
       setTotalCandidatesCount(candidateList.length);
+
+      const viaSup = candidateList.filter((c) => Boolean(c.supplier_id)).length;
+      const direct = candidateList.filter((c) => !c.supplier_id).length;
+      setSupplierCandidatesCount(viaSup);
+      setDirectCandidatesCount(direct);
 
       const irCount = candidateList.filter((c) => c.status === 'interview_ready').length;
       setInterviewReadyCount(irCount);
@@ -427,6 +421,31 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
         });
       }
 
+      // ITEM TYPE 8: Candidate Needs Help notifications
+      const { data: helpNotifs } = await supabase
+        .from('notifications')
+        .select('id, title, message, created_at, read')
+        .eq('user_id', user.id)
+        .eq('title', 'Candidate Needs Help')
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      (helpNotifs || []).forEach((hn: any) => {
+        const lines = (hn.message || '').split('\n');
+        const headerLine = lines[0] || '';
+        let cName = '';
+        if (headerLine.includes('— needs help:')) {
+          cName = headerLine.split('— needs help:')[0].trim();
+        }
+        items.unshift({
+          id: `cand-help-${hn.id}`,
+          type: 'candidate_help',
+          candidateName: cName || undefined,
+          supplierName: 'Candidate Request',
+          detail: headerLine || hn.message,
+        });
+      });
+
       setActionItems(items);
 
       // Speaking Test Requests Table (requested_by = auth.uid())
@@ -548,6 +567,7 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
     {
       title: 'Total Candidates',
       count: totalCandidatesCount,
+      breakdown: `${supplierCandidatesCount} via supplier · ${directCandidatesCount} direct`,
       icon: Users,
       color: 'text-sky-600',
       bg: 'bg-sky-50',
@@ -623,9 +643,16 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
                 <Icon className="w-4 h-4 text-[#2952A3] stroke-[1.5]" />
               </div>
               <div className="mt-2 flex items-baseline justify-between">
-                <span className="text-[24px] font-semibold text-[#1B3270] leading-tight tracking-tight">
-                  {loading ? '—' : card.count}
-                </span>
+                <div>
+                  <span className="text-[24px] font-semibold text-[#1B3270] leading-tight tracking-tight">
+                    {loading ? '—' : card.count}
+                  </span>
+                  {'breakdown' in card && !loading && (
+                    <div className="text-[10px] text-slate-500 font-medium mt-0.5">
+                      {card.breakdown}
+                    </div>
+                  )}
+                </div>
                 <span className="text-[11px] font-medium text-[#94A3B8] group-hover:text-[#1B3270] flex items-center transition-colors">
                   View <ArrowRight className="w-3 h-3 ml-0.5" />
                 </span>
@@ -785,6 +812,8 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
                             ? 'bg-blue-500'
                             : item.type === 'dt_attempt_limit'
                             ? 'bg-orange-500'
+                            : item.type === 'candidate_help'
+                            ? 'bg-amber-500'
                             : 'bg-amber-500'
                         }`}
                       />
@@ -820,7 +849,7 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
                       </button>
                     )}
 
-                    {item.type === 'final_test_locked' && (
+                    {(item.type === 'final_test_locked' || item.type === 'candidate_help') && (
                       <button
                         type="button"
                         onClick={() => onNavigateTab('my_candidates')}

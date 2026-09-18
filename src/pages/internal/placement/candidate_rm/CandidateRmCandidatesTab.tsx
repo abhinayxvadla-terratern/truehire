@@ -310,16 +310,8 @@ export const CandidateRmCandidatesTab: React.FC = () => {
       const supplierIds = (assignments || [])
         .filter((a) => a.entity_type === 'supplier')
         .map((a) => a.entity_id);
-      const directCandidateIds = (assignments || [])
-        .filter((a) => a.entity_type === 'candidate')
-        .map((a) => a.entity_id);
 
-      if (supplierIds.length === 0 && directCandidateIds.length === 0) {
-        setCandidates([]);
-        return;
-      }
-
-      // 2. Fetch candidates belonging to these suppliers or assigned directly
+      // 2. Fetch candidates assigned directly to this RM or belonging to assigned suppliers
       let candQuery = supabase
         .from('candidates')
         .select(`
@@ -330,6 +322,7 @@ export const CandidateRmCandidatesTab: React.FC = () => {
           target_role,
           language_level_self_reported,
           supplier_id,
+          assigned_rm_id,
           status,
           profile_completion_pct,
           dt_passed_at,
@@ -342,12 +335,10 @@ export const CandidateRmCandidatesTab: React.FC = () => {
         `)
         .order('created_at', { ascending: false });
 
-      if (supplierIds.length > 0 && directCandidateIds.length > 0) {
-        candQuery = candQuery.or(`supplier_id.in.(${supplierIds.join(',')}),id.in.(${directCandidateIds.join(',')})`);
-      } else if (supplierIds.length > 0) {
-        candQuery = candQuery.in('supplier_id', supplierIds);
+      if (supplierIds.length > 0) {
+        candQuery = candQuery.or(`assigned_rm_id.eq.${user.id},supplier_id.in.(${supplierIds.join(',')})`);
       } else {
-        candQuery = candQuery.in('id', directCandidateIds);
+        candQuery = candQuery.eq('assigned_rm_id', user.id);
       }
 
       const { data: cands, error } = await candQuery;
@@ -490,7 +481,7 @@ export const CandidateRmCandidatesTab: React.FC = () => {
           target_role: c.target_role,
           language_level: c.language_level_self_reported || 'B1 German',
           supplier_id: c.supplier_id,
-          supplier_name: sup?.company_name || 'Direct / Agency',
+          supplier_name: sup?.company_name || (c.supplier_id ? 'Supplier Partner' : 'Direct'),
           supplier_user_id: sup?.user_id || null,
           status: c.status,
           current_gate: gate ? gate.gate_type.toUpperCase() : 'Not Started',
@@ -926,7 +917,7 @@ export const CandidateRmCandidatesTab: React.FC = () => {
                 <tr>
                   <th className="py-3 px-4">Candidate Name</th>
                   <th className="py-3 px-4">Target Role</th>
-                  <th className="py-3 px-4">Supplier Partner</th>
+                  <th className="py-3 px-4">Type</th>
                   <th className="py-3 px-4 text-center">DT</th>
                   <th className="py-3 px-4 text-center">Cooling</th>
                   <th className="py-3 px-4 text-center">Profile</th>
@@ -958,9 +949,17 @@ export const CandidateRmCandidatesTab: React.FC = () => {
                       </span>
                     </td>
 
-                    {/* Supplier */}
-                    <td className="py-3.5 px-4 text-slate-800 font-medium">
-                      {c.supplier_name}
+                    {/* Type */}
+                    <td className="py-3.5 px-4">
+                      {c.supplier_id ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                          {c.supplier_name}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
+                          Direct
+                        </span>
+                      )}
                     </td>
 
                     {/* DT */}
@@ -1169,22 +1168,24 @@ export const CandidateRmCandidatesTab: React.FC = () => {
                                     <span>Remind Candidate</span>
                                   </button>
 
-                                  {/* Remind Supplier */}
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setOpenDropdownId(null);
-                                      setNudgeModal({ target: 'supplier', candidate: c });
-                                      setNudgeTitle(`Candidate Follow-Up: ${c.first_name}`);
-                                      setNudgeMessage(
-                                        `Candidate ${c.first_name} ${c.last_name}: Follow up with document verification.`
-                                      );
-                                    }}
-                                    className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-slate-700 font-medium cursor-pointer"
-                                  >
-                                    <Building2 size={13} className="text-sky-600" />
-                                    <span>Remind Supplier</span>
-                                  </button>
+                                  {/* Remind Supplier (supplier candidates only) */}
+                                  {c.supplier_id && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setOpenDropdownId(null);
+                                        setNudgeModal({ target: 'supplier', candidate: c });
+                                        setNudgeTitle(`Candidate Follow-Up: ${c.first_name}`);
+                                        setNudgeMessage(
+                                          `Candidate ${c.first_name} ${c.last_name}: Follow up with document verification.`
+                                        );
+                                      }}
+                                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center space-x-2 text-slate-700 font-medium cursor-pointer"
+                                    >
+                                      <Building2 size={13} className="text-sky-600" />
+                                      <span>Remind Supplier</span>
+                                    </button>
+                                  )}
 
                                   {/* Escalate to Placement Lead */}
                                   <button

@@ -323,6 +323,17 @@ export const BulkCandidateUpload: React.FC<BulkCandidateUploadProps> = ({
       let successCount = 0;
       let failedCount = 0;
 
+      // Look up active RM for this supplier
+      const { data: activeRmAssign } = await supabase
+        .from('rm_assignments')
+        .select('rm_profile_id')
+        .eq('entity_type', 'supplier')
+        .eq('entity_id', supplier.id)
+        .eq('active', true)
+        .maybeSingle();
+
+      const activeRmProfileId = activeRmAssign?.rm_profile_id || null;
+
       // 2. Process all rows
       for (const row of parsedRows) {
         if (!row.isValid) {
@@ -343,6 +354,7 @@ export const BulkCandidateUpload: React.FC<BulkCandidateUploadProps> = ({
         // Insert into candidates table
         const { error: insertErr } = await supabase.from('candidates').insert({
           supplier_id: supplier.id,
+          assigned_rm_id: activeRmProfileId,
           first_name: row.firstName,
           last_name: row.lastName,
           email: row.email,
