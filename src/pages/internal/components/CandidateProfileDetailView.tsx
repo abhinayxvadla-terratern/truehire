@@ -529,6 +529,34 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
                         {att.passed ? 'Pass' : 'Fail'}
                       </span>
                     )}
+                    {att.started_at && (() => {
+                      const startMs = new Date(att.started_at).getTime();
+                      const endMs = att.completed_at ? new Date(att.completed_at).getTime() : Date.now();
+                      const elapsedSec = Math.max(0, Math.floor((endMs - startMs) / 1000));
+                      const mins = Math.floor(elapsedSec / 60);
+                      const secs = elapsedSec % 60;
+                      const timerUsed = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')} / 30:00`;
+
+                      if (att.auto_submitted) {
+                        return (
+                          <div className="flex items-center space-x-1.5 text-[11px]">
+                            <span className="text-amber-600 font-medium">Auto-submitted (time expired)</span>
+                            <span className="text-slate-400 font-mono text-[10px]">({timerUsed})</span>
+                          </div>
+                        );
+                      }
+
+                      if (att.status === 'completed') {
+                        return (
+                          <div className="flex items-center space-x-1.5 text-[11px]">
+                            <span className="text-slate-600 font-medium">Completed in {mins} min {secs} sec</span>
+                            <span className="text-slate-400 font-mono text-[10px]">({timerUsed})</span>
+                          </div>
+                        );
+                      }
+
+                      return null;
+                    })()}
                   </div>
 
                   <div>

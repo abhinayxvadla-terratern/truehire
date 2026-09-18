@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import {
   Award,
@@ -64,6 +64,29 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   const [lastResultData, setLastResultData] = useState<any>(null);
   const [candidateRecord, setCandidateRecord] = useState<any>(candidate);
 
+  // Timer states (30 minutes = 1800s)
+  const [timerRemainingSeconds, setTimerRemainingSeconds] = useState<number | null>(null);
+  const [timerExpiresAt, setTimerExpiresAt] = useState<string | null>(null);
+  const [isTimeUpOverlayOpen, setIsTimeUpOverlayOpen] = useState(false);
+  const [showFiveMinToast, setShowFiveMinToast] = useState(false);
+  const [showOneMinModal, setShowOneMinModal] = useState(false);
+  const [resumeToast, setResumeToast] = useState<string | null>(null);
+
+  const hasTriggeredFiveMinWarning = useRef(false);
+  const hasTriggeredOneMinWarning = useRef(false);
+  const autoSubmittingRef = useRef(false);
+
+  // Format timer remaining as "MM:SS" (>= 60s) or "0:SS" (< 60s)
+  const formatTimeRemaining = (seconds: number) => {
+    const clamped = Math.max(0, seconds);
+    const mins = Math.floor(clamped / 60);
+    const secs = clamped % 60;
+    if (clamped >= 60) {
+      return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `0:${secs.toString().padStart(2, '0')}`;
+  };
+
   // Helper for difficulty badge styling
   const getDifficultyBadge = (difficulty: string) => {
     switch (difficulty) {
@@ -104,6 +127,38 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           </span>
         );
     }
+  };
+
+  const renderTimerDisplay = () => {
+    if (timerRemainingSeconds === null) return null;
+    const isCritical = timerRemainingSeconds <= 60;
+    const isWarning = timerRemainingSeconds <= 300 && !isCritical;
+
+    let bgClass = 'bg-[#F0F4FF] border-[#E2E8F4] text-[#1B3270]';
+    let iconColor = 'text-[#1B3270]';
+    let animStyle: React.CSSProperties = {};
+
+    if (isCritical) {
+      bgClass = 'bg-[#FEF2F2] border-[#FECACA] text-[#991B1B]';
+      iconColor = 'text-[#EF4444]';
+      animStyle = { animation: 'pulse-border-crit 0.8s infinite' };
+    } else if (isWarning) {
+      bgClass = 'bg-[#FFFBEB] border-[#FDE68A] text-[#92400E]';
+      iconColor = 'text-[#F59E0B]';
+      animStyle = { animation: 'pulse-border-warn 1.5s infinite' };
+    }
+
+    return (
+      <div
+        style={animStyle}
+        className={`px-3 py-1 rounded-[8px] border flex items-center gap-1.5 transition-colors ${bgClass}`}
+      >
+        <Clock size={14} className={`${iconColor} shrink-0`} />
+        <span className="text-[13px] font-semibold font-mono leading-none">
+          {formatTimeRemaining(timerRemainingSeconds)}
+        </span>
+      </div>
+    );
   };
 
   // --------------------------------------------------------------------------
@@ -237,6 +292,27 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
       const inProgressAttempt = attemptsList.find((a) => a.status === 'in_progress');
       if (inProgressAttempt) {
         setCurrentAttempt(inProgressAttempt);
+        const expiresStr = inProgressAttempt.timer_expires_at;
+        const nowMs = Date.now();
+        const expiresMs = expiresStr ? new Date(expiresStr).getTime() : nowMs + 1800000;
+        const remaining = Math.floor((expiresMs - nowMs) / 1000);
+
+        if (remaining <= 0) {
+          // Timer expired while away
+          await handleAutoSubmitExpiredAway(inProgressAttempt);
+          return;
+        }
+
+        // Resume active attempt
+        setTimerExpiresAt(expiresStr || new Date(nowMs + 1800000).toISOString());
+        setTimerRemainingSeconds(remaining);
+        if (remaining <= 300) hasTriggeredFiveMinWarning.current = true;
+        if (remaining <= 60) hasTriggeredOneMinWarning.current = true;
+
+        const timeStr = formatTimeRemaining(remaining);
+        setResumeToast(`Resuming your test. ${timeStr} remaining.`);
+        setTimeout(() => setResumeToast(null), 6000);
+
         await loadQuestionsAndResume(inProgressAttempt.id);
         return;
       }
@@ -296,6 +372,218 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   };
 
   // --------------------------------------------------------------------------
+  // TIMER INTERVAL EFFECT
+  // --------------------------------------------------------------------------
+  useEffect(() => {
+    if ((screen !== 'test' && screen !== 'review_before_submit') || !currentAttempt?.id || !timerExpiresAt) {
+      return;
+    }
+
+    const intervalId = setInterval(() => {
+      const expiresMs = new Date(timerExpiresAt).getTime();
+      const nowMs = Date.now();
+      const remaining = Math.floor((expiresMs - nowMs) / 1000);
+
+      setTimerRemainingSeconds(remaining);
+
+      // Warning at 5 minutes (300 seconds)
+      if (remaining <= 300 && remaining > 60 && !hasTriggeredFiveMinWarning.current) {
+        hasTriggeredFiveMinWarning.current = true;
+        setShowFiveMinToast(true);
+        setTimeout(() => setShowFiveMinToast(false), 8000);
+      }
+
+      // Warning at 1 minute (60 seconds)
+      if (remaining <= 60 && remaining > 0 && !hasTriggeredOneMinWarning.current) {
+        hasTriggeredOneMinWarning.current = true;
+        setShowOneMinModal(true);
+        setTimeout(() => setShowOneMinModal(false), 10000);
+      }
+
+      // Timer expired: trigger auto-submit
+      if (remaining <= 0) {
+        clearInterval(intervalId);
+        handleSubmitTest(true);
+      }
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [screen, currentAttempt?.id, timerExpiresAt, questions, selectedAnswers]);
+
+  // Re-sync client timer with server to prevent drift on question navigation
+  const syncTimerWithServer = async () => {
+    if (!currentAttempt?.id) return;
+    try {
+      const { data } = await supabase
+        .from('dt_attempts')
+        .select('timer_expires_at')
+        .eq('id', currentAttempt.id)
+        .maybeSingle();
+
+      if (data?.timer_expires_at) {
+        setTimerExpiresAt(data.timer_expires_at);
+        const serverRemaining = Math.floor((new Date(data.timer_expires_at).getTime() - Date.now()) / 1000);
+        setTimerRemainingSeconds(serverRemaining);
+        if (serverRemaining <= 0) {
+          handleSubmitTest(true);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to sync timer with server:', err);
+    }
+  };
+
+  // Option select handler: updates local state and persists answer immediately to dt_answers
+  const handleSelectOption = async (questionId: string, optionKey: 'a' | 'b' | 'c' | 'd') => {
+    setSelectedAnswers((prev) => ({
+      ...prev,
+      [questionId]: optionKey,
+    }));
+
+    if (currentAttempt?.id) {
+      try {
+        const q = questions.find((item) => item.id === questionId);
+        const isCorrect = q ? optionKey.toLowerCase() === q.correct_option.toLowerCase() : false;
+        await supabase
+          .from('dt_answers')
+          .delete()
+          .eq('attempt_id', currentAttempt.id)
+          .eq('question_id', questionId);
+
+        await supabase.from('dt_answers').insert({
+          attempt_id: currentAttempt.id,
+          question_id: questionId,
+          selected_option: optionKey,
+          is_correct: isCorrect,
+          answered_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn('Note on auto-saving answer:', err);
+      }
+    }
+  };
+
+  // Handle in-progress attempt that expired while the candidate was away
+  const handleAutoSubmitExpiredAway = async (inProgressAttempt: any) => {
+    try {
+      setIsTimeUpOverlayOpen(true);
+      // Wait 1 second as specified in Part 10 ("Show the Time's Up overlay briefly (1 second, no interaction needed)")
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      const { data: qData } = await supabase
+        .from('dt_questions')
+        .select('*')
+        .eq('is_active', true)
+        .order('question_order', { ascending: true });
+      const qList = qData || [];
+      setQuestions(qList);
+
+      const { data: ansData } = await supabase
+        .from('dt_answers')
+        .select('question_id, selected_option')
+        .eq('attempt_id', inProgressAttempt.id);
+
+      const ansMap: Record<string, 'a' | 'b' | 'c' | 'd'> = {};
+      (ansData || []).forEach((a) => {
+        if (a.selected_option) {
+          ansMap[a.question_id] = a.selected_option as any;
+        }
+      });
+      setSelectedAnswers(ansMap);
+      setCurrentAttempt(inProgressAttempt);
+
+      let correctAnswersCount = 0;
+      const answersToInsert = qList.map((q) => {
+        const selected = ansMap[q.id] || null;
+        const isCorrect = selected !== null && selected.toLowerCase() === q.correct_option.toLowerCase();
+        if (isCorrect) correctAnswersCount++;
+        return {
+          attempt_id: inProgressAttempt.id,
+          question_id: q.id,
+          selected_option: selected,
+          is_correct: isCorrect,
+          answered_at: new Date().toISOString(),
+        };
+      });
+
+      await supabase.from('dt_answers').delete().eq('attempt_id', inProgressAttempt.id);
+      await supabase.from('dt_answers').insert(answersToInsert);
+
+      const totalQuestions = qList.length || 15;
+      const scorePct = Math.round((correctAnswersCount / totalQuestions) * 10000) / 100;
+      const passed = correctAnswersCount >= 5;
+      const nowIso = new Date().toISOString();
+
+      const { data: updatedAttempt } = await supabase
+        .from('dt_attempts')
+        .update({
+          correct_answers: correctAnswersCount,
+          score_pct: scorePct,
+          passed: passed,
+          status: 'completed',
+          completed_at: nowIso,
+          auto_submitted: true,
+        })
+        .eq('id', inProgressAttempt.id)
+        .select()
+        .single();
+
+      const resultData = updatedAttempt || {
+        ...inProgressAttempt,
+        correct_answers: correctAnswersCount,
+        score_pct: scorePct,
+        passed,
+        auto_submitted: true,
+      };
+      setLastResultData(resultData);
+
+      if (passed) {
+        await supabase.from('gate_results').insert({
+          candidate_id: candidateRecord.id,
+          gate_type: 'dt',
+          status: 'pass',
+          score: scorePct,
+          review_status: 'not_required',
+          attempt_number: resultData.attempt_number || inProgressAttempt.attempt_number,
+        });
+
+        await supabase
+          .from('candidates')
+          .update({ status: 'in_progress', dt_passed_at: nowIso })
+          .eq('id', candidateRecord.id);
+
+        setIsTimeUpOverlayOpen(false);
+        setScreen('pass_result');
+      } else {
+        await supabase.from('gate_results').insert({
+          candidate_id: candidateRecord.id,
+          gate_type: 'dt',
+          status: 'fail',
+          score: scorePct,
+          attempt_number: resultData.attempt_number || inProgressAttempt.attempt_number,
+        });
+
+        const currentCount = candidateRecord.dt_attempt_count ?? 0;
+        const newCount = currentCount + 1;
+
+        await supabase
+          .from('candidates')
+          .update({ dt_attempt_count: newCount })
+          .eq('id', candidateRecord.id);
+
+        setCandidateRecord({ ...candidateRecord, dt_attempt_count: newCount });
+
+        setIsTimeUpOverlayOpen(false);
+        setScreen('fail_result');
+      }
+    } catch (err) {
+      console.error('Error in handleAutoSubmitExpiredAway:', err);
+      setIsTimeUpOverlayOpen(false);
+      setScreen('intro');
+    }
+  };
+
+  // --------------------------------------------------------------------------
   // START NEW TEST
   // --------------------------------------------------------------------------
   const handleStartTest = async () => {
@@ -311,15 +599,21 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
       const nextAttemptNumber = (count ?? 0) + 1;
 
-      // 2. Insert new attempt
+      // 2. Insert new attempt with 30-minute server timer
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + 1800 * 1000).toISOString();
+
       const { data: newAttempt, error: attErr } = await supabase
         .from('dt_attempts')
         .insert({
           candidate_id: candidateRecord.id,
           attempt_number: nextAttemptNumber,
           status: 'in_progress',
-          started_at: new Date().toISOString(),
+          started_at: now.toISOString(),
           total_questions: 15,
+          time_limit_seconds: 1800,
+          timer_expires_at: expiresAt,
+          auto_submitted: false,
         })
         .select()
         .single();
@@ -329,6 +623,11 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
       setCurrentAttempt(newAttempt);
       setSelectedAnswers({});
       setCurrentQIndex(0);
+      setTimerExpiresAt(expiresAt);
+      setTimerRemainingSeconds(1800);
+      hasTriggeredFiveMinWarning.current = false;
+      hasTriggeredOneMinWarning.current = false;
+      autoSubmittingRef.current = false;
 
       // 3. Load all 15 active questions
       const { data: qData, error: qErr } = await supabase
@@ -348,17 +647,37 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   };
 
   // --------------------------------------------------------------------------
-  // TEST SUBMISSION & AUTOMATED SCORING
+  // TEST SUBMISSION & AUTOMATED SCORING (Manual & Auto-Submit)
   // --------------------------------------------------------------------------
-  const handleSubmitTest = async () => {
-    if (!currentAttempt?.id || !candidateRecord?.id || questions.length === 0) return;
+  const handleSubmitTest = async (isAutoSubmit = false) => {
+    if (!currentAttempt?.id || !candidateRecord?.id) return;
+    if (autoSubmittingRef.current && !isAutoSubmit) return;
+
+    if (isAutoSubmit) {
+      autoSubmittingRef.current = true;
+      setIsTimeUpOverlayOpen(true);
+      setShowOneMinModal(false);
+      setShowConfirmModal(false);
+    }
 
     try {
       setIsSubmitting(true);
 
+      // Ensure questions are present
+      let qList = questions;
+      if (qList.length === 0) {
+        const { data: qData } = await supabase
+          .from('dt_questions')
+          .select('*')
+          .eq('is_active', true)
+          .order('question_order', { ascending: true });
+        qList = qData || [];
+        setQuestions(qList);
+      }
+
       // 1. Compare each question & prepare dt_answers rows
       let correctAnswersCount = 0;
-      const answersToInsert = questions.map((q) => {
+      const answersToInsert = qList.map((q) => {
         const selected = selectedAnswers[q.id] || null;
         const isCorrect = selected !== null && selected.toLowerCase() === q.correct_option.toLowerCase();
         if (isCorrect) correctAnswersCount++;
@@ -371,14 +690,15 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         };
       });
 
-      // Insert all answers
+      // Clear any prior answers for attempt then insert fresh 15 answers
+      await supabase.from('dt_answers').delete().eq('attempt_id', currentAttempt.id);
       const { error: insErr } = await supabase.from('dt_answers').insert(answersToInsert);
       if (insErr) {
         console.warn('Answers insertion note:', insErr);
       }
 
       // 2. Score Calculation
-      const totalQuestions = questions.length || 15;
+      const totalQuestions = qList.length || 15;
       const scorePct = Math.round((correctAnswersCount / totalQuestions) * 10000) / 100;
       const passed = correctAnswersCount >= 5;
 
@@ -392,13 +712,21 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           passed: passed,
           status: 'completed',
           completed_at: nowIso,
+          auto_submitted: isAutoSubmit,
         })
         .eq('id', currentAttempt.id)
         .select()
         .single();
 
       if (updAttErr) throw updAttErr;
-      setLastResultData(updatedAttempt || currentAttempt);
+      const resultData = updatedAttempt || {
+        ...currentAttempt,
+        correct_answers: correctAnswersCount,
+        score_pct: scorePct,
+        passed,
+        auto_submitted: isAutoSubmit,
+      };
+      setLastResultData(resultData);
 
       // 4. Branch based on Passed vs Failed
       if (passed) {
@@ -409,7 +737,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           status: 'pass',
           score: scorePct,
           review_status: 'not_required',
-          attempt_number: updatedAttempt?.attempt_number || currentAttempt.attempt_number,
+          attempt_number: resultData.attempt_number || currentAttempt.attempt_number,
         });
 
         // b. Update candidates: in_progress, dt_passed_at = now()
@@ -490,7 +818,14 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
         // Refresh state & show pass screen
         setShowConfirmModal(false);
-        setScreen('pass_result');
+        if (isAutoSubmit) {
+          setTimeout(() => {
+            setIsTimeUpOverlayOpen(false);
+            setScreen('pass_result');
+          }, 2000);
+        } else {
+          setScreen('pass_result');
+        }
       } else {
         // --- FAILED FLOW ---
         // a. Insert gate_results: fail
@@ -499,7 +834,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           gate_type: 'dt',
           status: 'fail',
           score: scorePct,
-          attempt_number: updatedAttempt?.attempt_number || currentAttempt.attempt_number,
+          attempt_number: resultData.attempt_number || currentAttempt.attempt_number,
         });
 
         // b. Update candidates: dt_attempt_count + 1
@@ -556,7 +891,14 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             });
           }
           setShowConfirmModal(false);
-          setScreen('fail_result');
+          if (isAutoSubmit) {
+            setTimeout(() => {
+              setIsTimeUpOverlayOpen(false);
+              setScreen('fail_result');
+            }, 2000);
+          } else {
+            setScreen('fail_result');
+          }
         } else {
           // Attempt 10: Activate 14-day cooling period
           const endsAtDate = new Date();
@@ -606,7 +948,14 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           }
 
           setShowConfirmModal(false);
-          setScreen('fail_result');
+          if (isAutoSubmit) {
+            setTimeout(() => {
+              setIsTimeUpOverlayOpen(false);
+              setScreen('fail_result');
+            }, 2000);
+          } else {
+            setScreen('fail_result');
+          }
         }
       }
 
@@ -642,6 +991,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
       setAllAttempts(refreshedAttempts || []);
     } catch (err) {
       console.error('Error submitting diagnostic test:', err);
+      setIsTimeUpOverlayOpen(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -934,6 +1284,12 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             <p className="text-sm font-medium text-emerald-700">
               {correctCount} correct out of 15
             </p>
+            {lastResultData?.auto_submitted && (
+              <div className="mt-3 p-3 bg-[#F0F4FF] border border-[#CBD5E1] rounded-[8px] text-xs text-[#1B3270] flex items-center justify-center space-x-2">
+                <Clock size={14} className="text-[#1B3270] shrink-0" />
+                <span>This attempt was auto-submitted when the 30-minute time limit was reached.</span>
+              </div>
+            )}
           </div>
 
           {/* Difficulty breakdown */}
@@ -1014,6 +1370,13 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             <p className="text-xs font-medium text-[#4A5568]">
               {correctCount} correct out of 15
             </p>
+
+            {lastResultData?.auto_submitted && (
+              <div className="p-3 bg-[#F0F4FF] border border-[#CBD5E1] rounded-[8px] text-xs text-[#1B3270] flex items-center justify-center space-x-2">
+                <Clock size={14} className="text-[#1B3270] shrink-0" />
+                <span>This attempt was auto-submitted when the 30-minute time limit was reached.</span>
+              </div>
+            )}
 
             {/* Attempt Circles & Remaining Attempts */}
             {!isTenFails ? (
@@ -1340,10 +1703,16 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             <span className="px-3 py-1 bg-slate-100 border border-[#E2E8F4] text-[#1B3270] rounded-full text-xs font-medium">
               Multiple choice
             </span>
-            <span className="px-3 py-1 bg-slate-100 border border-[#E2E8F4] text-[#1B3270] rounded-full text-xs font-medium">
-              No time limit
+            <span className="px-3 py-1 bg-slate-100 border border-[#E2E8F4] text-[#1B3270] rounded-full text-xs font-medium inline-flex items-center gap-1.5">
+              <Clock size={12} className="text-[#1B3270]" />
+              <span>30 minutes</span>
             </span>
           </div>
+
+          {/* Amber info line below pills */}
+          <p className="text-xs text-[#92400E]">
+            The test auto-submits when time runs out. Unanswered questions are marked incorrect.
+          </p>
 
           {/* Attempt Counter (if previous attempts) */}
           {usedRoundCount > 0 && (
@@ -1392,9 +1761,12 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                 Review all your selected options. You can change any answer before final submission.
               </p>
             </div>
-            <span className="text-xs font-bold text-[#1B3270] bg-slate-100 px-3 py-1.5 rounded-full">
-              {answeredCount}/15 Answered
-            </span>
+            <div className="flex items-center space-x-3 shrink-0">
+              <span className="text-xs font-bold text-[#1B3270] bg-slate-100 px-3 py-1.5 rounded-full">
+                {answeredCount}/15 Answered
+              </span>
+              {renderTimerDisplay()}
+            </div>
           </div>
 
           {/* Questions list */}
@@ -1495,7 +1867,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                 <button
                   type="button"
                   disabled={isSubmitting}
-                  onClick={handleSubmitTest}
+                  onClick={() => handleSubmitTest(false)}
                   className="px-5 py-2 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs flex items-center space-x-1.5 cursor-pointer"
                 >
                   {isSubmitting && <Loader2 size={13} className="animate-spin" />}
@@ -1526,21 +1898,36 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     : [];
 
   return (
-    <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-16">
-      {/* TOP BAR */}
+    <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-16 relative">
+      <style>{`
+        @keyframes pulse-border-warn {
+          0%, 100% { border-color: #FDE68A; }
+          50% { border-color: #F59E0B; }
+        }
+        @keyframes pulse-border-crit {
+          0%, 100% { border-color: #FECACA; }
+          50% { border-color: #EF4444; }
+        }
+      `}</style>
+
+      {/* TOP BAR: Left = Title, Center = Question info + progress bar, Right = Timer */}
       <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-4 shadow-[0_1px_4px_rgba(27,50,112,0.06)] flex items-center justify-between gap-4">
         <span className="text-xs font-bold text-[#1B3270] shrink-0">Diagnostic Test</span>
 
-        <span className="text-xs font-semibold text-[#4A5568]">
-          Question {currentQIndex + 1} of {questions.length || 15}
-        </span>
+        <div className="flex items-center space-x-3">
+          <span className="text-xs font-semibold text-[#4A5568] whitespace-nowrap">
+            Question {currentQIndex + 1} of {questions.length || 15}
+          </span>
+          <div className="w-20 sm:w-32 bg-[#E2E8F4] rounded-full h-2 overflow-hidden shrink-0">
+            <div
+              className="bg-[#1B3270] h-full transition-all duration-200"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
 
-        {/* Progress bar */}
-        <div className="w-24 sm:w-36 bg-[#E2E8F4] rounded-full h-2 overflow-hidden shrink-0">
-          <div
-            className="bg-[#1B3270] h-full transition-all duration-200"
-            style={{ width: `${progressPct}%` }}
-          />
+        <div className="shrink-0">
+          {renderTimerDisplay()}
         </div>
       </div>
 
@@ -1568,12 +1955,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
               return (
                 <div
                   key={opt.key}
-                  onClick={() => {
-                    setSelectedAnswers((prev) => ({
-                      ...prev,
-                      [currentQ.id]: opt.key,
-                    }));
-                  }}
+                  onClick={() => handleSelectOption(currentQ.id, opt.key)}
                   className={`p-4 rounded-[10px] border transition-all cursor-pointer flex items-center space-x-3.5 ${
                     isSelected
                       ? 'border-[#1B3270] bg-[#F0F4FF] shadow-xs'
@@ -1606,7 +1988,10 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             <button
               type="button"
               disabled={currentQIndex === 0}
-              onClick={() => setCurrentQIndex((prev) => Math.max(0, prev - 1))}
+              onClick={() => {
+                syncTimerWithServer();
+                setCurrentQIndex((prev) => Math.max(0, prev - 1));
+              }}
               className={`px-4 py-2 text-xs font-semibold rounded-[6px] transition-colors ${
                 currentQIndex === 0
                   ? 'text-slate-300 cursor-not-allowed'
@@ -1633,7 +2018,10 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
               <button
                 type="button"
                 disabled={!currentSelected}
-                onClick={() => setCurrentQIndex((prev) => Math.min(questions.length - 1, prev + 1))}
+                onClick={() => {
+                  syncTimerWithServer();
+                  setCurrentQIndex((prev) => Math.min(questions.length - 1, prev + 1));
+                }}
                 className={`px-5 py-2.5 text-xs font-bold rounded-[6px] transition-colors shadow-2xs ${
                   !currentSelected
                     ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
@@ -1644,6 +2032,63 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {/* 5-MINUTE WARNING TOAST */}
+      {showFiveMinToast && (
+        <div className="fixed top-5 right-5 z-50 bg-[#FFFBEB] border border-[#FDE68A] text-[#92400E] px-4 py-3 rounded-[8px] shadow-lg flex items-center space-x-2 animate-in slide-in-from-top duration-200">
+          <Clock size={16} className="text-[#F59E0B] shrink-0" />
+          <span className="text-xs font-semibold">5 minutes remaining.</span>
+        </div>
+      )}
+
+      {/* 1-MINUTE REMAINING BLOCKING MODAL */}
+      {showOneMinModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-[10px] p-6 max-w-md w-full shadow-2xl space-y-4 animate-in zoom-in-95 duration-150 border border-[#FECACA]">
+            <div className="flex items-center space-x-3 text-[#991B1B]">
+              <div className="w-10 h-10 rounded-full bg-rose-50 flex items-center justify-center text-[#EF4444]">
+                <Clock size={22} />
+              </div>
+              <h3 className="text-base font-bold text-[#1B3270]">1 Minute Remaining</h3>
+            </div>
+            <p className="text-xs text-[#4A5568] leading-relaxed">
+              You have 1 minute left. Any unanswered questions will be skipped on auto-submit.
+            </p>
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setShowOneMinModal(false)}
+                className="w-full py-2.5 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs cursor-pointer"
+              >
+                Continue Test
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TIME'S UP OVERLAY (AUTO-SUBMIT ON EXPIRY) */}
+      {isTimeUpOverlayOpen && (
+        <div className="fixed inset-0 z-[9999] bg-[#1B3270]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-[10px] p-8 max-w-sm w-full shadow-2xl text-center space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="w-16 h-16 rounded-full bg-amber-50 flex items-center justify-center mx-auto text-[#F59E0B]">
+              <Clock size={40} />
+            </div>
+            <h3 className="text-xl font-bold text-[#1B3270]">Time&apos;s Up</h3>
+            <p className="text-xs text-[#4A5568] leading-relaxed">
+              Your test has been submitted automatically.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* RESUME IN-PROGRESS TEST TOAST */}
+      {resumeToast && (
+        <div className="fixed top-5 right-5 z-50 bg-[#F0F4FF] border border-[#CBD5E1] text-[#1B3270] px-4 py-3 rounded-[8px] shadow-lg flex items-center space-x-2 animate-in slide-in-from-top duration-200">
+          <Clock size={16} className="text-[#1B3270] shrink-0" />
+          <span className="text-xs font-semibold">{resumeToast}</span>
         </div>
       )}
     </div>

@@ -268,6 +268,7 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
           filteredAnswers.map((item) => {
             const q = item.dt_questions;
             const isCorrect = item.is_correct;
+            const isUnanswered = !item.selected_option;
             const selectedOpt = item.selected_option?.toLowerCase();
             const correctOpt = q?.correct_option?.toLowerCase();
 
@@ -284,7 +285,7 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
                 className="bg-white border border-[#E2E8F4] rounded-[10px] p-5 shadow-[0_1px_4px_rgba(27,50,112,0.06)] relative overflow-hidden"
                 style={{
                   borderLeftWidth: '4px',
-                  borderLeftColor: isCorrect ? '#10B981' : '#EF4444',
+                  borderLeftColor: isCorrect ? '#10B981' : isUnanswered ? '#F59E0B' : '#EF4444',
                 }}
               >
                 {/* CARD HEADER */}
@@ -302,7 +303,11 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
                   </div>
 
                   <div>
-                    {isCorrect ? (
+                    {isUnanswered ? (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                        Not answered
+                      </span>
+                    ) : isCorrect ? (
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                         <CheckCircle2 size={12} className="mr-1" />
                         Correct
@@ -332,7 +337,18 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
                     let icon = null;
                     let showCorrectLabel = false;
 
-                    if (isSelected && isThisCorrect) {
+                    if (isUnanswered) {
+                      // Option state 5: Not Answered
+                      if (isThisCorrect) {
+                        rowBg = 'bg-[#F0FDF4] border-[#10B981]';
+                        circleStyle = 'border-2 border-[#10B981] text-[#10B981] bg-white';
+                        icon = <Check size={16} className="text-[#10B981] shrink-0" />;
+                        showCorrectLabel = true;
+                      } else {
+                        rowBg = 'bg-white border-[#E2E8F4]';
+                        circleStyle = 'bg-slate-200 text-slate-500';
+                      }
+                    } else if (isSelected && isThisCorrect) {
                       rowBg = 'bg-[#F0FDF4] border-[#10B981]';
                       circleStyle = 'bg-[#10B981] text-white';
                       icon = <Check size={16} className="text-[#10B981] shrink-0" />;
@@ -361,7 +377,13 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
                           <div>
                             <span
                               className={`text-xs ${
-                                isSelected || isThisCorrect ? 'font-medium text-[#1B3270]' : 'text-[#4A5568]'
+                                isUnanswered
+                                  ? isThisCorrect
+                                    ? 'font-medium text-[#1B3270]'
+                                    : 'text-slate-400'
+                                  : isSelected || isThisCorrect
+                                  ? 'font-medium text-[#1B3270]'
+                                  : 'text-[#4A5568]'
                               }`}
                             >
                               {opt.text}

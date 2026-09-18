@@ -960,6 +960,7 @@ export type Database = {
       dt_attempts: {
         Row: {
           attempt_number: number
+          auto_submitted: boolean | null
           candidate_id: string | null
           completed_at: string | null
           correct_answers: number | null
@@ -969,10 +970,13 @@ export type Database = {
           score_pct: number | null
           started_at: string | null
           status: string | null
+          time_limit_seconds: number | null
+          timer_expires_at: string | null
           total_questions: number | null
         }
         Insert: {
           attempt_number?: number
+          auto_submitted?: boolean | null
           candidate_id?: string | null
           completed_at?: string | null
           correct_answers?: number | null
@@ -982,10 +986,13 @@ export type Database = {
           score_pct?: number | null
           started_at?: string | null
           status?: string | null
+          time_limit_seconds?: number | null
+          timer_expires_at?: string | null
           total_questions?: number | null
         }
         Update: {
           attempt_number?: number
+          auto_submitted?: boolean | null
           candidate_id?: string | null
           completed_at?: string | null
           correct_answers?: number | null
@@ -995,6 +1002,8 @@ export type Database = {
           score_pct?: number | null
           started_at?: string | null
           status?: string | null
+          time_limit_seconds?: number | null
+          timer_expires_at?: string | null
           total_questions?: number | null
         }
         Relationships: [

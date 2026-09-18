@@ -101,6 +101,8 @@ interface DtAttemptItem {
   passed: boolean | null;
   started_at: string | null;
   completed_at: string | null;
+  auto_submitted?: boolean | null;
+  time_limit_seconds?: number | null;
 }
 
 interface DtAnswerItem {
@@ -503,7 +505,7 @@ export const CandidatesTab: React.FC = () => {
         // DT attempts
         supabase
           .from('dt_attempts')
-          .select('id, attempt_number, correct_answers, total_questions, score_pct, passed, started_at, completed_at')
+          .select('id, attempt_number, correct_answers, total_questions, score_pct, passed, started_at, completed_at, auto_submitted, time_limit_seconds')
           .eq('candidate_id', cand.id)
           .order('attempt_number', { ascending: false }),
 
@@ -1549,6 +1551,32 @@ export const CandidatesTab: React.FC = () => {
                           <p className="text-[11px] text-slate-400">
                             {att.completed_at ? new Date(att.completed_at).toLocaleString() : 'In progress'}
                           </p>
+                          {att.started_at && (() => {
+                            const startMs = new Date(att.started_at).getTime();
+                            const endMs = att.completed_at ? new Date(att.completed_at).getTime() : Date.now();
+                            const elapsedSec = Math.max(0, Math.floor((endMs - startMs) / 1000));
+                            const mins = Math.floor(elapsedSec / 60);
+                            const secs = elapsedSec % 60;
+                            const timerUsed = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')} / 30:00`;
+
+                            if (att.auto_submitted) {
+                              return (
+                                <p className="text-[11px] text-amber-600 font-medium">
+                                  Auto-submitted (time expired) • <span className="font-mono text-slate-500">{timerUsed}</span>
+                                </p>
+                              );
+                            }
+
+                            if (att.completed_at) {
+                              return (
+                                <p className="text-[11px] text-slate-500 font-medium">
+                                  Completed in {mins} min {secs} sec • <span className="font-mono text-slate-400">{timerUsed}</span>
+                                </p>
+                              );
+                            }
+
+                            return null;
+                          })()}
                         </div>
                         <div className="flex items-center space-x-2">
                           <span
