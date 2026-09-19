@@ -62,6 +62,14 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   const [showDifficultyBreakdown, setShowDifficultyBreakdown] = useState(true);
   const [lastResultData, setLastResultData] = useState<any>(null);
   const [candidateRecord, setCandidateRecord] = useState<any>(candidate);
+  const [attemptDifficultyStats, setAttemptDifficultyStats] = useState<
+    Record<string, { correct: number; total: number }>
+  >({
+    beginner: { correct: 0, total: 3 },
+    elementary: { correct: 0, total: 3 },
+    intermediate: { correct: 0, total: 3 },
+    upper_intermediate: { correct: 0, total: 6 },
+  });
 
   // Timer states (30 minutes = 1800s)
   const [timerRemainingSeconds, setTimerRemainingSeconds] = useState<number | null>(null);
@@ -112,12 +120,6 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         return (
           <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-orange-50 text-orange-700 border border-orange-200">
             Upper Intermediate
-          </span>
-        );
-      case 'b2':
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-purple-50 text-purple-700 border border-purple-200">
-            B2 Level
           </span>
         );
       default:
@@ -426,6 +428,55 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
     return () => clearInterval(intervalId);
   }, [screen, currentAttempt?.id, timerExpiresAt, questions, selectedAnswers]);
+
+  // Load performance breakdown by difficulty for completed attempts
+  useEffect(() => {
+    if (!lastResultData?.id) return;
+    const fetchAttemptDifficultyStats = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('dt_answers')
+          .select(`
+            is_correct,
+            dt_questions (
+              difficulty_level
+            )
+          `)
+          .eq('attempt_id', lastResultData.id);
+
+        if (error) throw error;
+
+        const counts: Record<string, { correct: number; total: number }> = {
+          beginner: { correct: 0, total: 0 },
+          elementary: { correct: 0, total: 0 },
+          intermediate: { correct: 0, total: 0 },
+          upper_intermediate: { correct: 0, total: 0 },
+        };
+
+        (data || []).forEach((row: any) => {
+          const diff = row.dt_questions?.difficulty_level?.toLowerCase();
+          if (diff && counts[diff]) {
+            counts[diff].total += 1;
+            if (row.is_correct) {
+              counts[diff].correct += 1;
+            }
+          }
+        });
+
+        // Use standard quotas if totals are 0
+        if (counts.beginner.total === 0) counts.beginner.total = 3;
+        if (counts.elementary.total === 0) counts.elementary.total = 3;
+        if (counts.intermediate.total === 0) counts.intermediate.total = 3;
+        if (counts.upper_intermediate.total === 0) counts.upper_intermediate.total = 6;
+
+        setAttemptDifficultyStats(counts);
+      } catch (err) {
+        console.error('Error fetching attempt difficulty stats:', err);
+      }
+    };
+
+    fetchAttemptDifficultyStats();
+  }, [lastResultData?.id]);
 
   // Re-sync client timer with server to prevent drift on question navigation
   const syncTimerWithServer = async () => {
@@ -1266,6 +1317,27 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         passed,
         auto_submitted: isAutoSubmit,
       };
+
+      // Immediately compute difficulty stats from current test questions
+      const immediateStats: Record<string, { correct: number; total: number }> = {
+        beginner: { correct: 0, total: 0 },
+        elementary: { correct: 0, total: 0 },
+        intermediate: { correct: 0, total: 0 },
+        upper_intermediate: { correct: 0, total: 0 },
+      };
+      qList.forEach((q) => {
+        const diff = q.difficulty_level?.toLowerCase();
+        if (diff && immediateStats[diff]) {
+          immediateStats[diff].total += 1;
+          const selected = selectedAnswers[q.id] || null;
+          const isCorrect = selected !== null && selected.toLowerCase() === q.correct_option.toLowerCase();
+          if (isCorrect) {
+            immediateStats[diff].correct += 1;
+          }
+        }
+      });
+      setAttemptDifficultyStats(immediateStats);
+
       setLastResultData(resultData);
 
       // Record seen questions for this candidate
@@ -1526,13 +1598,12 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   // DIFFICULTY BREAKDOWN WIDGET
   // --------------------------------------------------------------------------
   const renderDifficultyBreakdown = (attemptRecord: any) => {
-    // Standard 3 questions per tier in the 15 questions set
+    // Standard 4 tiers present in the Diagnostic Test
     const levels = [
       { key: 'beginner', label: 'Beginner' },
       { key: 'elementary', label: 'Elementary' },
       { key: 'intermediate', label: 'Intermediate' },
       { key: 'upper_intermediate', label: 'Upper Intermediate' },
-      { key: 'b2', label: 'B2 Level' },
     ];
 
     return (
@@ -1544,43 +1615,54 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           <span className="text-xs font-bold text-[#1B3270]">
             Performance by Difficulty Level
           </span>
-          <button type="button" className="text-slate-400 hover:text-slate-600">
+          <button type="button" className="text-slate-400 hover:text-slate-600 cursor-pointer">
             {showDifficultyBreakdown ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
         </div>
 
         {showDifficultyBreakdown && (
           <div className="space-y-2.5 pt-1">
-            {levels.map((lvl) => (
-              <div
-                key={lvl.key}
-                onClick={() => {
-                  if (attemptRecord?.id) {
-                    setReviewAttemptId(attemptRecord.id);
-                    setReviewInitialFilter(lvl.key);
-                    setScreen('question_review');
-                  }
-                }}
-                className="group p-2 rounded-[6px] hover:bg-white hover:border-[#CBD5E1] border border-transparent transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                title={`Click to review ${lvl.label} questions`}
-              >
-                <div className="flex items-center min-w-[140px]">
-                  {getDifficultyBadge(lvl.key)}
-                </div>
+            {levels.map((lvl) => {
+              const stat = attemptDifficultyStats[lvl.key] || {
+                correct: 0,
+                total: lvl.key === 'upper_intermediate' ? 6 : 3,
+              };
+              const pct = stat.total > 0 ? Math.round((stat.correct / stat.total) * 100) : 0;
 
-                <div className="flex items-center space-x-3 flex-1 sm:max-w-xs">
-                  <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
-                    <div
-                      className="bg-[#1B3270] h-full"
-                      style={{ width: '66%' }} // representative breakdown bar
-                    />
+              return (
+                <div
+                  key={lvl.key}
+                  onClick={() => {
+                    if (attemptRecord?.id) {
+                      setReviewAttemptId(attemptRecord.id);
+                      setReviewInitialFilter(lvl.key);
+                      setScreen('question_review');
+                    }
+                  }}
+                  className="group p-2 rounded-[6px] hover:bg-white hover:border-[#CBD5E1] border border-transparent transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  title={`Click to review ${lvl.label} questions`}
+                >
+                  <div className="flex items-center min-w-[140px]">
+                    {getDifficultyBadge(lvl.key)}
                   </div>
-                  <span className="text-[11px] text-[#94A3B8] group-hover:text-[#1B3270] font-medium">
-                    Filter →
-                  </span>
+
+                  <div className="flex items-center space-x-3 flex-1 sm:max-w-xs">
+                    <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                      <div
+                        className="bg-[#1B3270] h-full transition-all duration-300"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-xs font-semibold text-[#1B3270] min-w-[28px] text-right font-mono">
+                      {stat.correct}/{stat.total}
+                    </span>
+                    <span className="text-[11px] text-[#94A3B8] group-hover:text-[#1B3270] font-medium shrink-0">
+                      Filter →
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

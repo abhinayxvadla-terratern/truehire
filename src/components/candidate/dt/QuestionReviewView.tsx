@@ -31,6 +31,10 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
   const [isLegacyAttempt, setIsLegacyAttempt] = useState(false);
 
   useEffect(() => {
+    setFilter(initialFilter);
+  }, [initialFilter]);
+
+  useEffect(() => {
     const fetchAnswers = async () => {
       if (!attemptId) return;
       try {
@@ -194,12 +198,6 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
             Upper Intermediate
           </span>
         );
-      case 'b2':
-        return (
-          <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-purple-50 text-purple-700 border border-purple-200">
-            B2 Level
-          </span>
-        );
       default:
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-slate-100 text-slate-700 border border-slate-200">
@@ -293,14 +291,12 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
         </button>
 
         {/* Difficulty filter tags */}
-        {['beginner', 'elementary', 'intermediate', 'upper_intermediate', 'b2'].map((diff) => {
+        {['beginner', 'elementary', 'intermediate', 'upper_intermediate'].map((diff) => {
           const count = answers.filter((a) => a.dt_questions?.difficulty_level === diff).length;
           if (count === 0) return null;
           const label =
             diff === 'upper_intermediate'
               ? 'Upper Int'
-              : diff === 'b2'
-              ? 'B2'
               : diff.charAt(0).toUpperCase() + diff.slice(1);
           return (
             <button
