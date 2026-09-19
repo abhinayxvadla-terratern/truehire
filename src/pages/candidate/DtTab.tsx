@@ -1100,22 +1100,25 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   };
 
   const selectDTQuestions = async (candidateId: string): Promise<DtQuestion[]> => {
-    const distribution: Record<string, number> = {
-      beginner: 3,
-      elementary: 3,
-      intermediate: 3,
-      upper_intermediate: 6,
-    };
+    // Strict progressive difficulty order:
+    // Q1-3: Beginner, Q4-6: Elementary, Q7-9: Intermediate, Q10-15: Upper Intermediate
+    const tierOrder: Array<{ level: string; count: number }> = [
+      { level: 'beginner', count: 3 },
+      { level: 'elementary', count: 3 },
+      { level: 'intermediate', count: 3 },
+      { level: 'upper_intermediate', count: 6 },
+    ];
 
     const selectedQuestions: DtQuestion[] = [];
 
-    for (const [level, count] of Object.entries(distribution)) {
+    for (const { level, count } of tierOrder) {
       // Step 1: Get all active questions at this difficulty level
       const { data: allActive, error: qErr } = await supabase
         .from('dt_questions')
         .select('*')
         .eq('difficulty_level', level)
-        .eq('is_active', true);
+        .eq('is_active', true)
+        .order('question_order', { ascending: true });
 
       if (qErr) {
         console.error(`Error fetching ${level} questions:`, qErr);
@@ -1157,11 +1160,15 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         ];
       }
 
+      // Sort selected questions within this difficulty level by question_order
+      selected.sort((a, b) => (a.question_order || 0) - (b.question_order || 0));
+
       selectedQuestions.push(...selected);
     }
 
-    // Step 5: Shuffle all 15 together so difficulty levels are not grouped in order
-    return shuffleArray(selectedQuestions);
+    // Return the 15 questions in strict progressive difficulty order:
+    // Positions 1-3: Beginner | Positions 4-6: Elementary | Positions 7-9: Intermediate | Positions 10-15: Upper Intermediate
+    return selectedQuestions;
   };
 
   // --------------------------------------------------------------------------
