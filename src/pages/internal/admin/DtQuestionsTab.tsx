@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../../../lib/supabase';
 import { useAuth } from '../../../context/AuthContext';
 import {
   HelpCircle,
   Search,
   CheckCircle,
-  AlertTriangle,
   Plus,
   Loader2,
   RefreshCw,
@@ -16,6 +15,7 @@ import {
 import { MultiSelectFilter } from '../../../components/ui/MultiSelectFilter';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
 import { DtQuestionBulkImport } from '../components/DtQuestionBulkImport';
+import { PoolHealthSummary } from '../components/PoolHealthSummary';
 
 interface DtQuestion {
   id: string;
@@ -40,6 +40,8 @@ export const DtQuestionsTab: React.FC = () => {
   const [questions, setQuestions] = useState<DtQuestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [poolRefreshTrigger, setPoolRefreshTrigger] = useState(0);
+  const importSectionRef = useRef<HTMLDivElement>(null);
 
   // Filters (Multi-select)
   const [difficultyFilter, setDifficultyFilter] = useState<string[]>([]);
@@ -144,6 +146,7 @@ export const DtQuestionsTab: React.FC = () => {
       // Default new question order to max + 1
       const maxOrder = mapped.reduce((max, cur) => Math.max(max, cur.question_order || 0), 0);
       setNewQuestionOrder(maxOrder + 1);
+      setPoolRefreshTrigger((prev) => prev + 1);
     } catch (err) {
       console.error('Error fetching dt questions:', err);
     } finally {
@@ -155,10 +158,6 @@ export const DtQuestionsTab: React.FC = () => {
   useEffect(() => {
     fetchQuestions();
   }, []);
-
-  const activeCount = useMemo(() => {
-    return questions.filter((q) => q.is_active).length;
-  }, [questions]);
 
   // Edit Action
   const handleOpenEdit = (q: DtQuestion) => {
@@ -424,37 +423,18 @@ export const DtQuestionsTab: React.FC = () => {
         </button>
       </div>
 
-      {/* ACTIVE COUNT BANNER */}
-      <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-4 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center space-x-3">
-          <div className="p-2.5 bg-blue-50 text-[#1B3270] rounded-lg">
-            <HelpCircle className="w-5 h-5" />
-          </div>
-          <div>
-            <p className="text-sm font-bold text-slate-800">
-              {activeCount} active questions in the test
-            </p>
-            <p className="text-xs text-slate-500">
-              Diagnostic assessment randomly draws from the active question bank.
-            </p>
-          </div>
-        </div>
-
-        {activeCount !== 15 ? (
-          <span className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
-            <AlertTriangle className="w-3.5 h-3.5 mr-1.5" />
-            Test has {activeCount} active questions. Expected: 15.
-          </span>
-        ) : (
-          <span className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-            <CheckCircle className="w-3.5 h-3.5 mr-1.5" />
-            Standard 15-question quota met.
-          </span>
-        )}
-      </div>
+      {/* POOL HEALTH MONITORING */}
+      <PoolHealthSummary
+        refreshTrigger={poolRefreshTrigger}
+        onImportClick={() => {
+          importSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }}
+      />
 
       {/* BULK IMPORT SECTION */}
-      <DtQuestionBulkImport onImportComplete={fetchQuestions} />
+      <div ref={importSectionRef}>
+        <DtQuestionBulkImport onImportComplete={fetchQuestions} />
+      </div>
 
       {/* SECTION: QUESTION BANK */}
       <div className="space-y-4">

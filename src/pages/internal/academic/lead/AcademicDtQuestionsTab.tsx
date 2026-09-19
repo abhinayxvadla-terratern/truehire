@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../../../../lib/supabase';
 import { useAuth } from '../../../../context/AuthContext';
 import {
@@ -10,12 +10,12 @@ import {
   X,
   Edit2,
   Power,
-  AlertTriangle,
   Trash2,
 } from 'lucide-react';
 import { MultiSelectFilter } from '../../../../components/ui/MultiSelectFilter';
 import { DeleteConfirmationModal } from '../../components/DeleteConfirmationModal';
 import { DtQuestionBulkImport } from '../../components/DtQuestionBulkImport';
+import { PoolHealthSummary } from '../../components/PoolHealthSummary';
 
 interface DtQuestion {
   id: string;
@@ -40,6 +40,8 @@ export const AcademicDtQuestionsTab: React.FC = () => {
   const [questions, setQuestions] = useState<DtQuestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [poolRefreshTrigger, setPoolRefreshTrigger] = useState(0);
+  const importSectionRef = useRef<HTMLDivElement>(null);
 
   // Filters (Multi-select)
   const [difficultyFilter, setDifficultyFilter] = useState<string[]>([]);
@@ -89,11 +91,6 @@ export const AcademicDtQuestionsTab: React.FC = () => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
-
-  const activeQuestionsCount = useMemo(
-    () => questions.filter((q) => q.is_active).length,
-    [questions]
-  );
 
   const fetchQuestions = async () => {
     try {
@@ -145,6 +142,7 @@ export const AcademicDtQuestionsTab: React.FC = () => {
       }));
 
       setQuestions(mapped);
+      setPoolRefreshTrigger((prev) => prev + 1);
     } catch (err: any) {
       console.error('Error fetching DT questions:', err);
     } finally {
@@ -430,40 +428,18 @@ export const AcademicDtQuestionsTab: React.FC = () => {
         </div>
       </div>
 
-      {/* Active Count & Warning Banner */}
-      <div className="space-y-3">
-        <div className="flex items-center space-x-3 text-xs">
-          <div className="px-3 py-1.5 rounded-[8px] border border-[#E2E8F4] bg-white font-medium text-slate-700 flex items-center space-x-2">
-            <span className="text-slate-400">Active Questions:</span>
-            <span
-              className={`font-bold ${
-                activeQuestionsCount === 15 ? 'text-emerald-700' : 'text-amber-700'
-              }`}
-            >
-              {activeQuestionsCount} / 15
-            </span>
-          </div>
-          <div className="px-3 py-1.5 rounded-[8px] border border-[#E2E8F4] bg-white font-medium text-slate-700 flex items-center space-x-2">
-            <span className="text-slate-400">Total in Bank:</span>
-            <span className="font-bold text-slate-900">{questions.length}</span>
-          </div>
-        </div>
-
-        {!loading && activeQuestionsCount !== 15 && (
-          <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-[8px] flex items-start space-x-2.5 text-xs text-amber-900">
-            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-bold block">Warning: Active Question Count Mismatch</span>
-              <p className="mt-0.5 text-[11px] text-amber-800">
-                The Diagnostic Test requires exactly 15 active questions for candidate evaluations. Currently, there are {activeQuestionsCount} active questions configured. Candidate evaluations will be gated until exactly 15 questions are active.
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
+      {/* POOL HEALTH MONITORING */}
+      <PoolHealthSummary
+        refreshTrigger={poolRefreshTrigger}
+        onImportClick={() => {
+          importSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }}
+      />
 
       {/* BULK IMPORT SECTION */}
-      <DtQuestionBulkImport onImportComplete={fetchQuestions} />
+      <div ref={importSectionRef}>
+        <DtQuestionBulkImport onImportComplete={fetchQuestions} />
+      </div>
 
       {/* Main Table Card */}
       <div className="bg-white border border-[#E2E8F4] rounded-[10px] shadow-2xs overflow-hidden">

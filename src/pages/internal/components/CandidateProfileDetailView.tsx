@@ -35,6 +35,8 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
   const [coolingPeriodsList, setCoolingPeriodsList] = useState<any[]>([]);
   const [offeringsAvailed, setOfferingsAvailed] = useState(false);
   const [selectedAttemptIdForReview, setSelectedAttemptIdForReview] = useState<string | null>(null);
+  const [seenQuestions, setSeenQuestions] = useState<any[]>([]);
+  const [poolStats, setPoolStats] = useState<Record<string, number>>({});
 
   useEffect(() => {
     const fetchData = async () => {
@@ -53,6 +55,8 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
           dtAttRes,
           coolingRes,
           offRes,
+          seenRes,
+          poolStatsRes,
         ] = await Promise.all([
           supabase.from('candidates').select('*').eq('id', candidateId).maybeSingle(),
           supabase.from('candidate_personal_info').select('*').eq('candidate_id', candidateId).maybeSingle(),
@@ -64,6 +68,18 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
           supabase.from('dt_attempts').select('*').eq('candidate_id', candidateId).order('attempt_number', { ascending: false }),
           supabase.from('cooling_periods').select('*').eq('candidate_id', candidateId).eq('gate_type', 'dt').order('started_at', { ascending: false }),
           supabase.from('candidate_offerings').select('*').eq('candidate_id', candidateId).eq('gate_type_failed', 'dt').eq('status', 'availed'),
+          supabase.from('dt_candidate_seen_questions').select(`
+            question_id,
+            times_seen,
+            first_seen_at,
+            last_seen_at,
+            dt_questions (
+              id,
+              difficulty_level,
+              is_active
+            )
+          `).eq('candidate_id', candidateId),
+          supabase.from('dt_question_pool_stats').select('*'),
         ]);
 
         const allCp = coolingRes.data || [];
@@ -80,6 +96,15 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
         setCoolingPeriodsList(allCp);
         setActiveCooling(activeCp);
         setOfferingsAvailed((offRes.data || []).length > 0);
+
+        setSeenQuestions(seenRes.data || []);
+        const statsMap: Record<string, number> = {};
+        (poolStatsRes.data || []).forEach((row: any) => {
+          if (row.difficulty_level) {
+            statsMap[row.difficulty_level.toLowerCase()] = Number(row.active_count) || 0;
+          }
+        });
+        setPoolStats(statsMap);
       } catch (err) {
         console.error('Error loading candidate profile details:', err);
       } finally {
@@ -519,6 +544,59 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
             </span>
           </div>
         </div>
+
+        {/* Seen Questions Telemetry */}
+        {(() => {
+          const seenByLevel: Record<string, number> = {
+            beginner: 0,
+            elementary: 0,
+            intermediate: 0,
+            upper_intermediate: 0,
+          };
+
+          seenQuestions.forEach((sq: any) => {
+            const diff = sq.dt_questions?.difficulty_level?.toLowerCase();
+            if (diff && seenByLevel[diff] !== undefined) {
+              seenByLevel[diff] += 1;
+            }
+          });
+
+          const totalUniqueSeen = seenQuestions.length;
+
+          const TARGETS: Record<string, { label: string; required: number }> = {
+            beginner: { label: 'Beginner', required: 30 },
+            elementary: { label: 'Elementary', required: 30 },
+            intermediate: { label: 'Intermediate', required: 30 },
+            upper_intermediate: { label: 'Upper Intermediate', required: 60 },
+          };
+
+          const exhaustedLevels = Object.entries(TARGETS)
+            .filter(([key]) => {
+              const activeInPool = poolStats[key] || 0;
+              return activeInPool > 0 && seenByLevel[key] >= activeInPool;
+            })
+            .map(([_, cfg]) => cfg.label);
+
+          return (
+            <div className="p-3.5 bg-slate-50 rounded-[6px] border border-[#E2E8F4] space-y-2">
+              <div className="text-xs text-slate-700">
+                <span className="font-semibold text-[#1B3270]">Diagnostic Test Questions Seen:</span>{' '}
+                <span className="font-bold text-slate-900">{totalUniqueSeen}</span> unique questions (Beginner:{' '}
+                {seenByLevel.beginner}/30 | Elementary: {seenByLevel.elementary}/30 | Intermediate:{' '}
+                {seenByLevel.intermediate}/30 | Upper Int: {seenByLevel.upper_intermediate}/60)
+              </div>
+
+              {exhaustedLevels.length > 0 && (
+                <div className="p-2.5 rounded-[6px] bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center space-x-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>
+                    {exhaustedLevels.join(', ')} pool exhausted — least-recently-seen questions will be reused for this level.
+                  </span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Attempts Table */}
         <div className="space-y-2 pt-1">

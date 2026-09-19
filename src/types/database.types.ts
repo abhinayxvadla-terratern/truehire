@@ -1028,6 +1028,87 @@ export type Database = {
           },
         ]
       }
+      dt_attempt_questions: {
+        Row: {
+          attempt_id: string
+          created_at: string | null
+          id: string
+          position: number
+          question_id: string
+        }
+        Insert: {
+          attempt_id: string
+          created_at?: string | null
+          id?: string
+          position: number
+          question_id: string
+        }
+        Update: {
+          attempt_id?: string
+          created_at?: string | null
+          id?: string
+          position?: number
+          question_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "dt_attempt_questions_attempt_id_fkey"
+            columns: ["attempt_id"]
+            isOneToOne: false
+            referencedRelation: "dt_attempts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dt_attempt_questions_question_id_fkey"
+            columns: ["question_id"]
+            isOneToOne: false
+            referencedRelation: "dt_questions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      dt_candidate_seen_questions: {
+        Row: {
+          candidate_id: string
+          first_seen_at: string | null
+          id: string
+          last_seen_at: string | null
+          question_id: string
+          times_seen: number | null
+        }
+        Insert: {
+          candidate_id: string
+          first_seen_at?: string | null
+          id?: string
+          last_seen_at?: string | null
+          question_id: string
+          times_seen?: number | null
+        }
+        Update: {
+          candidate_id?: string
+          first_seen_at?: string | null
+          id?: string
+          last_seen_at?: string | null
+          question_id?: string
+          times_seen?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "dt_candidate_seen_questions_candidate_id_fkey"
+            columns: ["candidate_id"]
+            isOneToOne: false
+            referencedRelation: "candidates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dt_candidate_seen_questions_question_id_fkey"
+            columns: ["question_id"]
+            isOneToOne: false
+            referencedRelation: "dt_questions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       dt_question_audit: {
         Row: {
           action: string
@@ -2944,9 +3025,23 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      dt_question_pool_stats: {
+        Row: {
+          active_count: number | null
+          difficulty_level: string | null
+          inactive_count: number | null
+          total_count: number | null
+        }
+      }
     }
     Functions: {
+      record_candidate_seen_questions: {
+        Args: {
+          p_candidate_id: string
+          p_question_ids: string[]
+        }
+        Returns: undefined
+      }
       accept_employer_team_invite: {
         Args: {
           p_first_name: string

@@ -8,7 +8,6 @@ import {
   Download,
   FileSpreadsheet,
   CheckCircle2,
-  AlertTriangle,
   Loader2,
   ChevronDown,
   ChevronUp,
@@ -50,6 +49,12 @@ export const DtQuestionBulkImport: React.FC<DtQuestionBulkImportProps> = ({
     successCount: number;
     skippedCount: number;
     activeCount: number;
+    poolStatus?: {
+      beginner: number;
+      elementary: number;
+      intermediate: number;
+      upper_intermediate: number;
+    };
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -275,16 +280,35 @@ export const DtQuestionBulkImport: React.FC<DtQuestionBulkImportProps> = ({
         insertedCount += 1;
       }
 
-      // Check active count
-      const { count: activeCount } = await supabase
-        .from('dt_questions')
-        .select('*', { count: 'exact', head: true })
-        .eq('is_active', true);
+      // Query pool health
+      const { data: statsData } = await supabase
+        .from('dt_question_pool_stats')
+        .select('*');
+
+      const counts: Record<string, number> = {
+        beginner: 0,
+        elementary: 0,
+        intermediate: 0,
+        upper_intermediate: 0,
+      };
+      (statsData || []).forEach((row: any) => {
+        if (row.difficulty_level) {
+          counts[row.difficulty_level.toLowerCase()] = Number(row.active_count) || 0;
+        }
+      });
+
+      const totalActive = counts.beginner + counts.elementary + counts.intermediate + counts.upper_intermediate;
 
       setImportResult({
         successCount: insertedCount,
         skippedCount: parsedRows.length - insertedCount,
-        activeCount: activeCount ?? 0,
+        activeCount: totalActive,
+        poolStatus: {
+          beginner: counts.beginner,
+          elementary: counts.elementary,
+          intermediate: counts.intermediate,
+          upper_intermediate: counts.upper_intermediate,
+        },
       });
 
       onImportComplete();
@@ -498,34 +522,27 @@ export const DtQuestionBulkImport: React.FC<DtQuestionBulkImportProps> = ({
             )
           )}
 
-          {/* STEP 4: Results & Active Question Count Warning */}
+          {/* STEP 4: Results & Pool Status Banner */}
           {importResult && (
             <div className="space-y-3">
-              <div className="p-3.5 rounded-[8px] bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>
-                    <strong>{importResult.successCount} questions imported successfully.</strong>{' '}
+              <div className="p-3.5 rounded-[8px] bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start space-x-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p>
+                    <strong>Import successful. {importResult.successCount} questions added.</strong>{' '}
                     {importResult.skippedCount > 0 &&
-                      `${importResult.skippedCount} skipped due to validation errors or duplicates.`}
-                  </span>
+                      `(${importResult.skippedCount} skipped due to validation errors or duplicates)`}
+                  </p>
+                  {importResult.poolStatus && (
+                    <p className="text-emerald-800 font-medium">
+                      Pool status: Beginner: {importResult.poolStatus.beginner}/30 | Elementary:{' '}
+                      {importResult.poolStatus.elementary}/30 | Intermediate:{' '}
+                      {importResult.poolStatus.intermediate}/30 | Upper Int:{' '}
+                      {importResult.poolStatus.upper_intermediate}/60
+                    </p>
+                  )}
                 </div>
               </div>
-
-              {/* Active count != 15 warning */}
-              {importResult.activeCount !== 15 && (
-                <div className="p-3.5 rounded-[8px] bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start space-x-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-semibold">
-                      Active question count is now {importResult.activeCount}.
-                    </p>
-                    <p className="mt-0.5 text-amber-800">
-                      The Diagnostic Test expects exactly 15. Deactivate or activate questions to reach 15.
-                    </p>
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>

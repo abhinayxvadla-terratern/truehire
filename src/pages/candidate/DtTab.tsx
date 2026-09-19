@@ -332,15 +332,34 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   // --------------------------------------------------------------------------
   const loadQuestionsAndResume = async (attemptId: string) => {
     try {
-      // 1. Load active questions
-      const { data: qData, error: qErr } = await supabase
-        .from('dt_questions')
-        .select('*')
-        .eq('is_active', true)
-        .order('question_order', { ascending: true });
+      // 1. Load questions assigned to this attempt via dt_attempt_questions
+      const { data: daqData, error: daqErr } = await supabase
+        .from('dt_attempt_questions')
+        .select(`
+          position,
+          question_id,
+          dt_questions (*)
+        `)
+        .eq('attempt_id', attemptId)
+        .order('position', { ascending: true });
 
-      if (qErr) throw qErr;
-      const qList: DtQuestion[] = qData || [];
+      let qList: DtQuestion[] = [];
+      if (!daqErr && daqData && daqData.length > 0) {
+        qList = daqData
+          .map((d: any) => d.dt_questions as DtQuestion)
+          .filter(Boolean);
+      } else {
+        // Fallback for legacy attempts created before dt_attempt_questions
+        const { data: qData, error: qErr } = await supabase
+          .from('dt_questions')
+          .select('*')
+          .eq('is_active', true)
+          .order('question_order', { ascending: true });
+
+        if (qErr) throw qErr;
+        qList = qData || [];
+      }
+
       setQuestions(qList);
 
       // 2. Load existing answers for this attempt
@@ -915,12 +934,30 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
       setIsTimeUpOverlayOpen(true);
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      const { data: qData } = await supabase
-        .from('dt_questions')
-        .select('*')
-        .eq('is_active', true)
-        .order('question_order', { ascending: true });
-      const qList = qData || [];
+      // 1. Load questions assigned to this attempt via dt_attempt_questions (with legacy fallback)
+      const { data: daqData } = await supabase
+        .from('dt_attempt_questions')
+        .select(`
+          position,
+          question_id,
+          dt_questions (*)
+        `)
+        .eq('attempt_id', inProgressAttempt.id)
+        .order('position', { ascending: true });
+
+      let qList: DtQuestion[] = [];
+      if (daqData && daqData.length > 0) {
+        qList = daqData
+          .map((d: any) => d.dt_questions as DtQuestion)
+          .filter(Boolean);
+      } else {
+        const { data: qData } = await supabase
+          .from('dt_questions')
+          .select('*')
+          .eq('is_active', true)
+          .order('question_order', { ascending: true });
+        qList = qData || [];
+      }
       setQuestions(qList);
 
       const { data: ansData } = await supabase
@@ -981,12 +1018,99 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         auto_submitted: true,
       };
 
+      // Record seen questions for this candidate
+      try {
+        await supabase.rpc('record_candidate_seen_questions', {
+          p_candidate_id: inProgressAttempt.candidate_id,
+          p_question_ids: qList.map((q) => q.id),
+        });
+      } catch (seenErr) {
+        console.error('Error recording seen questions:', seenErr);
+      }
+
       await completeTestAttempt(resultData, passed, scorePct, true, inProgressAttempt.id);
     } catch (err) {
       console.error('Error in handleAutoSubmitExpiredAway:', err);
       setIsTimeUpOverlayOpen(false);
       setScreen('intro');
     }
+  };
+
+  // --------------------------------------------------------------------------
+  // DYNAMIC NON-REPEATING QUESTION SELECTION ALGORITHM
+  // --------------------------------------------------------------------------
+  const shuffleArray = <T,>(array: T[]): T[] => {
+    const arr = [...array];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  };
+
+  const selectDTQuestions = async (candidateId: string): Promise<DtQuestion[]> => {
+    const distribution: Record<string, number> = {
+      beginner: 3,
+      elementary: 3,
+      intermediate: 3,
+      upper_intermediate: 6,
+    };
+
+    const selectedQuestions: DtQuestion[] = [];
+
+    for (const [level, count] of Object.entries(distribution)) {
+      // Step 1: Get all active questions at this difficulty level
+      const { data: allActive, error: qErr } = await supabase
+        .from('dt_questions')
+        .select('*')
+        .eq('difficulty_level', level)
+        .eq('is_active', true);
+
+      if (qErr) {
+        console.error(`Error fetching ${level} questions:`, qErr);
+        throw qErr;
+      }
+
+      const activeList: DtQuestion[] = (allActive || []) as DtQuestion[];
+      if (activeList.length === 0) continue;
+
+      const activeIds = activeList.map((q) => q.id);
+
+      // Step 2: Get questions this candidate has already seen at this level
+      const { data: seen } = await supabase
+        .from('dt_candidate_seen_questions')
+        .select('question_id, last_seen_at')
+        .eq('candidate_id', candidateId)
+        .in('question_id', activeIds);
+
+      const seenMap = new Map((seen || []).map((s) => [s.question_id, s.last_seen_at]));
+
+      // Step 3: Split into unseen and seen
+      const unseen = activeList.filter((q) => !seenMap.has(q.id));
+      const seenQuestions = activeList
+        .filter((q) => seenMap.has(q.id))
+        .sort((a, b) => {
+          const aTime = seenMap.get(a.id);
+          const bTime = seenMap.get(b.id);
+          return new Date(aTime || 0).getTime() - new Date(bTime || 0).getTime();
+        });
+
+      // Step 4: Select required count (unseen first, then least-recently-seen)
+      let selected: DtQuestion[] = [];
+      if (unseen.length >= count) {
+        selected = shuffleArray(unseen).slice(0, count);
+      } else {
+        selected = [
+          ...shuffleArray(unseen),
+          ...seenQuestions.slice(0, count - unseen.length),
+        ];
+      }
+
+      selectedQuestions.push(...selected);
+    }
+
+    // Step 5: Shuffle all 15 together so difficulty levels are not grouped in order
+    return shuffleArray(selectedQuestions);
   };
 
   // --------------------------------------------------------------------------
@@ -997,7 +1121,10 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     try {
       setScreen('loading');
 
-      // 1. Get total previous attempts count
+      // 1. Select dynamic non-repeating 15 questions BEFORE creating attempt
+      const selectedQuestions = await selectDTQuestions(candidateRecord.id);
+
+      // 2. Get total previous attempts count
       const { count } = await supabase
         .from('dt_attempts')
         .select('*', { count: 'exact', head: true })
@@ -1005,7 +1132,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
       const nextAttemptNumber = (count ?? 0) + 1;
 
-      // 2. Insert new attempt with 30-minute server timer
+      // 3. Insert new attempt with 30-minute server timer
       const now = new Date();
       const expiresAt = new Date(now.getTime() + 1800 * 1000).toISOString();
 
@@ -1026,6 +1153,21 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
       if (attErr) throw attErr;
 
+      // 4. Batch insert dt_attempt_questions
+      const attemptQuestionsToInsert = selectedQuestions.map((q, idx) => ({
+        attempt_id: newAttempt.id,
+        question_id: q.id,
+        position: idx + 1,
+      }));
+
+      const { error: daqErr } = await supabase
+        .from('dt_attempt_questions')
+        .insert(attemptQuestionsToInsert);
+
+      if (daqErr) {
+        console.error('Error inserting attempt questions:', daqErr);
+      }
+
       setCurrentAttempt(newAttempt);
       setSelectedAnswers({});
       setCurrentQIndex(0);
@@ -1035,16 +1177,8 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
       hasTriggeredOneMinWarning.current = false;
       autoSubmittingRef.current = false;
 
-      // 3. Load all 15 active questions
-      const { data: qData, error: qErr } = await supabase
-        .from('dt_questions')
-        .select('*')
-        .eq('is_active', true)
-        .order('question_order', { ascending: true });
-
-      if (qErr) throw qErr;
-      setQuestions(qData || []);
-
+      // 5. Load test interface using these assigned questions
+      setQuestions(selectedQuestions);
       setScreen('test');
     } catch (err) {
       console.error('Error starting test:', err);
@@ -1133,6 +1267,16 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         auto_submitted: isAutoSubmit,
       };
       setLastResultData(resultData);
+
+      // Record seen questions for this candidate
+      try {
+        await supabase.rpc('record_candidate_seen_questions', {
+          p_candidate_id: candidateRecord.id,
+          p_question_ids: qList.map((q) => q.id),
+        });
+      } catch (seenErr) {
+        console.error('Error recording seen questions:', seenErr);
+      }
 
       await completeTestAttempt(resultData, passed, scorePct, isAutoSubmit, currentAttempt.id);
 

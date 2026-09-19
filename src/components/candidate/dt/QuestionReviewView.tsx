@@ -28,6 +28,7 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
   const [attempt, setAttempt] = useState<any>(null);
   const [answers, setAnswers] = useState<any[]>([]);
   const [filter, setFilter] = useState<'all' | 'correct' | 'incorrect' | string>(initialFilter);
+  const [isLegacyAttempt, setIsLegacyAttempt] = useState(false);
 
   useEffect(() => {
     const fetchAnswers = async () => {
@@ -45,16 +46,12 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
         if (attErr) throw attErr;
         setAttempt(attData);
 
-        // 2. Fetch dt_answers joined with dt_questions
-        const { data: ansData, error: ansErr } = await supabase
-          .from('dt_answers')
+        // 2. Try loading from dt_attempt_questions first
+        const { data: daqData } = await supabase
+          .from('dt_attempt_questions')
           .select(`
-            id,
-            attempt_id,
+            position,
             question_id,
-            selected_option,
-            is_correct,
-            answered_at,
             dt_questions (
               id,
               question_text,
@@ -68,18 +65,76 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
               question_order
             )
           `)
+          .eq('attempt_id', attemptId)
+          .order('position', { ascending: true });
+
+        // 3. Fetch dt_answers
+        const { data: ansData, error: ansErr } = await supabase
+          .from('dt_answers')
+          .select('*')
           .eq('attempt_id', attemptId);
 
         if (ansErr) throw ansErr;
 
-        // Sort by dt_questions.question_order ascending
-        const sorted = (ansData || []).sort((a: any, b: any) => {
-          const orderA = a.dt_questions?.question_order ?? 0;
-          const orderB = b.dt_questions?.question_order ?? 0;
-          return orderA - orderB;
-        });
+        if (daqData && daqData.length > 0) {
+          const answerMap = new Map((ansData || []).map((a: any) => [a.question_id, a]));
+          const mapped = daqData.map((item: any) => {
+            const ans = answerMap.get(item.question_id);
+            return {
+              id: ans?.id || item.question_id,
+              attempt_id: attemptId,
+              question_id: item.question_id,
+              selected_option: ans?.selected_option || null,
+              is_correct: ans?.is_correct || false,
+              answered_at: ans?.answered_at || null,
+              position: item.position,
+              dt_questions: item.dt_questions,
+            };
+          });
+          setAnswers(mapped);
+          setIsLegacyAttempt(false);
+        } else {
+          // Backward compatibility: load legacy attempts directly from dt_answers
+          const { data: legacyData, error: legErr } = await supabase
+            .from('dt_answers')
+            .select(`
+              id,
+              attempt_id,
+              question_id,
+              selected_option,
+              is_correct,
+              answered_at,
+              dt_questions (
+                id,
+                question_text,
+                option_a,
+                option_b,
+                option_c,
+                option_d,
+                correct_option,
+                difficulty_level,
+                topic,
+                question_order
+              )
+            `)
+            .eq('attempt_id', attemptId);
 
-        setAnswers(sorted);
+          if (legErr) throw legErr;
+
+          const sorted = (legacyData || [])
+            .sort((a: any, b: any) => {
+              const orderA = a.dt_questions?.question_order ?? 0;
+              const orderB = b.dt_questions?.question_order ?? 0;
+              return orderA - orderB;
+            })
+            .map((item: any, idx: number) => ({
+              ...item,
+              position: idx + 1,
+            }));
+
+          setAnswers(sorted);
+          setIsLegacyAttempt(true);
+        }
       } catch (err) {
         console.error('Error fetching attempt review data:', err);
       } finally {
@@ -192,6 +247,13 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
         </div>
       </div>
 
+      {/* LEGACY ATTEMPT NOTICE */}
+      {isLegacyAttempt && (
+        <div className="bg-slate-50 border border-slate-200 rounded-[8px] px-4 py-2.5 text-xs text-slate-500">
+          Question order for this attempt may not reflect original sequence.
+        </div>
+      )}
+
       {/* FILTER BAR */}
       <div className="flex items-center space-x-2 overflow-x-auto pb-1 no-scrollbar">
         <button
@@ -292,7 +354,7 @@ export const QuestionReviewView: React.FC<QuestionReviewViewProps> = ({
                 <div className="flex items-center justify-between gap-2 mb-3">
                   <div className="flex items-center space-x-2">
                     <span className="text-xs font-bold text-[#1B3270]">
-                      Q{q?.question_order ?? '-'}
+                      Q{item.position ?? q?.question_order ?? '-'}
                     </span>
                     {q?.difficulty_level && getDifficultyBadge(q.difficulty_level)}
                     {q?.topic && (
