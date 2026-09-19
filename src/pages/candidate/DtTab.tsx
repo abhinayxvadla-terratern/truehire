@@ -57,8 +57,6 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   const [recommendedOfferings, setRecommendedOfferings] = useState<any[]>([]);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
-  const [showExitModal, setShowExitModal] = useState(false);
-  const [showRestartModal, setShowRestartModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [reviewAttemptId, setReviewAttemptId] = useState<string | null>(null);
   const [reviewInitialFilter, setReviewInitialFilter] = useState<string>('all');
@@ -1247,39 +1245,6 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     }
   };
 
-  // --------------------------------------------------------------------------
-  // RESTART TEST (Always from start: Question 1, fresh 30-min timer)
-  // --------------------------------------------------------------------------
-  const handleRestartTest = async () => {
-    setShowRestartModal(false);
-    if (!candidateRecord?.id) return;
-    try {
-      setScreen('loading');
-
-      if (currentAttempt?.id) {
-        await supabase
-          .from('dt_attempts')
-          .update({
-            status: 'abandoned',
-            completed_at: new Date().toISOString(),
-          })
-          .eq('id', currentAttempt.id);
-        await supabase.from('dt_answers').delete().eq('attempt_id', currentAttempt.id);
-      }
-
-      setSelectedAnswers({});
-      setCurrentQIndex(0);
-      setTimerRemainingSeconds(1800);
-      hasTriggeredFiveMinWarning.current = false;
-      hasTriggeredOneMinWarning.current = false;
-      autoSubmittingRef.current = false;
-
-      await handleStartTest();
-    } catch (err) {
-      console.error('Error restarting test:', err);
-      setScreen('intro');
-    }
-  };
 
   // --------------------------------------------------------------------------
   // TEST SUBMISSION & AUTOMATED SCORING (Manual & Auto-Submit)
@@ -2329,15 +2294,40 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             </p>
           )}
 
-          {/* Start Test Button */}
-          <button
-            type="button"
-            onClick={handleStartTest}
-            className="w-full py-3 px-5 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
-          >
-            <span>Start Test</span>
-            <ArrowRight size={15} />
-          </button>
+          {/* Test Action Button: Resume if attempt in progress, otherwise Start */}
+          {currentAttempt?.status === 'in_progress' && (timerRemainingSeconds === null || timerRemainingSeconds > 0) ? (
+            <div className="space-y-3">
+              <div className="p-3.5 bg-[#FFFBEB] border border-[#FDE68A] rounded-[8px] flex items-center justify-between text-xs text-[#92400E]">
+                <div className="flex items-center space-x-2 font-medium">
+                  <Clock size={16} className="text-[#F59E0B] shrink-0" />
+                  <span>Test attempt in progress. Answers are saved.</span>
+                </div>
+                {timerRemainingSeconds !== null && (
+                  <span className="font-mono font-bold text-[#92400E]">
+                    {formatTimeRemaining(timerRemainingSeconds)} left
+                  </span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setScreen('test')}
+                className="w-full py-3 px-5 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
+              >
+                <span>Resume Test</span>
+                <ArrowRight size={15} />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleStartTest}
+              className="w-full py-3 px-5 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
+            >
+              <span>Start Test</span>
+              <ArrowRight size={15} />
+            </button>
+          )}
         </div>
 
         {/* ATTEMPT HISTORY */}
@@ -2511,29 +2501,17 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         }
       `}</style>
 
-      {/* TOP BAR: Left = Back & Restart, Center = Question info + progress bar, Right = Timer */}
-      <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-3.5 sm:p-4 shadow-[0_1px_4px_rgba(27,50,112,0.06)] flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center space-x-2">
-          <button
-            type="button"
-            onClick={() => setShowExitModal(true)}
-            className="inline-flex items-center space-x-1 text-xs font-semibold text-[#4A5568] hover:text-[#1B3270] px-2.5 py-1.5 rounded-[6px] border border-[#E2E8F4] hover:bg-slate-50 transition-colors cursor-pointer"
-            title="Return to Overview"
-          >
-            <ArrowLeft size={14} />
-            <span>Back</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowRestartModal(true)}
-            className="inline-flex items-center space-x-1 text-xs font-semibold text-[#B91C1C] hover:text-[#991B1B] px-2.5 py-1.5 rounded-[6px] border border-[#FECACA] hover:bg-rose-50 transition-colors cursor-pointer"
-            title="Restart test from start"
-          >
-            <RotateCcw size={13} />
-            <span>Restart</span>
-          </button>
-        </div>
+      {/* TOP BAR: Left = Back to Overview, Center = Question info + progress bar, Right = Timer */}
+      <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-3.5 sm:p-4 shadow-[0_1px_4px_rgba(27,50,112,0.06)] flex items-center justify-between gap-4">
+        <button
+          type="button"
+          onClick={() => setScreen('intro')}
+          className="inline-flex items-center space-x-1.5 text-xs font-semibold text-[#1B3270] hover:text-[#2952A3] px-3 py-1.5 rounded-[6px] border border-[#E2E8F4] hover:bg-slate-50 transition-colors cursor-pointer shrink-0"
+          title="Return to Overview"
+        >
+          <ArrowLeft size={14} />
+          <span>Back</span>
+        </button>
 
         <div className="flex items-center space-x-3">
           <span className="text-xs font-semibold text-[#4A5568] whitespace-nowrap">
@@ -2652,77 +2630,6 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                 Next
               </button>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* EXIT CONFIRMATION MODAL */}
-      {showExitModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-[10px] p-6 max-w-md w-full shadow-xl space-y-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center space-x-3 text-[#1B3270]">
-              <AlertCircle size={22} className="text-[#F59E0B]" />
-              <h3 className="text-base font-bold">Leave Test</h3>
-            </div>
-
-            <p className="text-xs text-[#4A5568] leading-relaxed">
-              Your answered questions for this attempt are saved. The test timer continues running in the background and you can resume this attempt anytime before time expires.
-            </p>
-
-            <div className="flex items-center justify-end space-x-3 pt-3">
-              <button
-                type="button"
-                onClick={() => setShowExitModal(false)}
-                className="px-4 py-2 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs cursor-pointer"
-              >
-                Continue Test
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowExitModal(false);
-                  setScreen('intro');
-                  runStateChecks();
-                }}
-                className="px-4 py-2 border border-[#E2E8F4] hover:bg-slate-50 text-[#4A5568] text-xs font-medium rounded-[6px] transition-colors cursor-pointer"
-              >
-                Exit to Overview
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* RESTART CONFIRMATION MODAL */}
-      {showRestartModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-[10px] p-6 max-w-md w-full shadow-xl space-y-4 animate-in zoom-in-95 duration-150 border border-rose-100">
-            <div className="flex items-center space-x-3 text-[#B91C1C]">
-              <RotateCcw size={22} className="text-[#EF4444]" />
-              <h3 className="text-base font-bold text-[#1B3270]">Restart Test from Start</h3>
-            </div>
-
-            <p className="text-xs text-[#4A5568] leading-relaxed">
-              This will abandon your current attempt and start a fresh attempt beginning at Question 1 with a new 30-minute timer. This will count toward your total attempts.
-            </p>
-
-            <div className="flex items-center justify-end space-x-3 pt-3">
-              <button
-                type="button"
-                onClick={() => setShowRestartModal(false)}
-                className="px-4 py-2 border border-[#E2E8F4] hover:bg-slate-50 text-[#4A5568] text-xs font-medium rounded-[6px] transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleRestartTest}
-                className="px-5 py-2 bg-[#B91C1C] hover:bg-[#991B1B] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs flex items-center space-x-1.5 cursor-pointer"
-              >
-                <RotateCcw size={13} />
-                <span>Restart from Start</span>
-              </button>
-            </div>
           </div>
         </div>
       )}
