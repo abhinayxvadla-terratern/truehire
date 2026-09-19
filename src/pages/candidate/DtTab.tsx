@@ -30,7 +30,6 @@ type ScreenState =
   | 'pass_result'
   | 'fail_result'
   | 'cooling_active'
-  | 'complete_training_first'
   | 'question_review';
 
 interface DtQuestion {
@@ -71,6 +70,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   const [showFiveMinToast, setShowFiveMinToast] = useState(false);
   const [showOneMinModal, setShowOneMinModal] = useState(false);
   const [resumeToast, setResumeToast] = useState<string | null>(null);
+  const [coolingExpiredToast, setCoolingExpiredToast] = useState<string | null>(null);
 
   const hasTriggeredFiveMinWarning = useRef(false);
   const hasTriggeredOneMinWarning = useRef(false);
@@ -250,7 +250,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         return;
       }
 
-      // CHECK 3: Cooling expired, check offerings.
+      // CHECK 3: Cooling just expired?
       const { data: expiredCooling } = await supabase
         .from('cooling_periods')
         .select('*')
@@ -267,15 +267,8 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           .update({ status: 'expired' })
           .eq('id', expiredCooling.id);
 
-        // Check if any offering availed
-        const hasAvailed = (offData || []).some((o: any) => o.status === 'availed');
-
-        if (!hasAvailed) {
-          setActiveCoolingPeriod(expiredCooling);
-          setScreen('complete_training_first');
-          return;
-        } else {
-          // Reset attempt count and unlock fresh 10
+        if (expiredCooling.cooling_trigger === 'round_exhausted') {
+          // Fresh round begins — reset attempt count
           await supabase
             .from('candidates')
             .update({ dt_attempt_count: 0 })
@@ -283,9 +276,14 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
           cand.dt_attempt_count = 0;
           setCandidateRecord({ ...cand, dt_attempt_count: 0 });
-          setScreen('intro');
-          return;
+          setCoolingExpiredToast('Your break has ended. 10 fresh attempts are available.');
+        } else {
+          const remainingAttempts = Math.max(0, 10 - (cand.dt_attempt_count ?? 0));
+          setCoolingExpiredToast(`Your break has ended. ${remainingAttempts} attempts remaining.`);
         }
+
+        setScreen('intro');
+        return;
       }
 
       // CHECK 4: Attempt in progress?
@@ -463,11 +461,458 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     }
   };
 
+  // --------------------------------------------------------------------------
+  // RM NOTIFICATION HELPER
+  // --------------------------------------------------------------------------
+  const notifyAssignedRm = async (title: string, message: string) => {
+    try {
+      let targetRmIds: string[] = [];
+      if (candidateRecord?.assigned_rm_id) {
+        targetRmIds.push(candidateRecord.assigned_rm_id);
+      } else if (candidateRecord?.supplier_id) {
+        const { data: rmAssign } = await supabase
+          .from('rm_assignments')
+          .select('rm_profile_id')
+          .eq('entity_type', 'supplier')
+          .eq('entity_id', candidateRecord.supplier_id)
+          .eq('active', true)
+          .maybeSingle();
+        if (rmAssign?.rm_profile_id) {
+          targetRmIds.push(rmAssign.rm_profile_id);
+        }
+      }
+
+      if (targetRmIds.length === 0) {
+        const { data: rmProfiles } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('internal_role', 'candidate_supplier_rm');
+        if (rmProfiles) {
+          targetRmIds = rmProfiles.map((p) => p.id);
+        }
+      }
+
+      if (targetRmIds.length > 0) {
+        const notifs = targetRmIds.map((uid) => ({
+          user_id: uid,
+          title,
+          message,
+          type: 'gate_result',
+          read: false,
+        }));
+        await supabase.from('notifications').insert(notifs);
+      }
+    } catch (err) {
+      console.error('Error sending RM notification:', err);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // PUSH OFFERINGS (NON-BLOCKING)
+  // --------------------------------------------------------------------------
+  const pushDtOfferings = async () => {
+    try {
+      const { data: dtOfferings } = await supabase
+        .from('offerings')
+        .select('id')
+        .eq('applicable_gate', 'dt')
+        .eq('is_active', true);
+
+      if (dtOfferings && dtOfferings.length > 0) {
+        const { data: existingOff } = await supabase
+          .from('candidate_offerings')
+          .select('offering_id')
+          .eq('candidate_id', candidateRecord.id)
+          .eq('gate_type_failed', 'dt');
+
+        const existingIds = new Set((existingOff || []).map((o) => o.offering_id));
+        const newRecommendations = dtOfferings
+          .filter((o) => !existingIds.has(o.id))
+          .map((o) => ({
+            candidate_id: candidateRecord.id,
+            offering_id: o.id,
+            gate_type_failed: 'dt',
+            status: 'recommended',
+          }));
+
+        if (newRecommendations.length > 0) {
+          await supabase.from('candidate_offerings').insert(newRecommendations);
+        }
+      }
+
+      const { data: refOff } = await supabase
+        .from('candidate_offerings')
+        .select(`
+          id,
+          offering_id,
+          gate_type_failed,
+          status,
+          offerings (
+            id,
+            name,
+            description,
+            type,
+            price,
+            applicable_gate
+          )
+        `)
+        .eq('candidate_id', candidateRecord.id)
+        .eq('gate_type_failed', 'dt');
+
+      setRecommendedOfferings(refOff || []);
+    } catch (err) {
+      console.error('Error pushing DT offerings:', err);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // COMPLETE TEST ATTEMPT (PASS / FAIL / COOLING TRIGGERS)
+  // --------------------------------------------------------------------------
+  const completeTestAttempt = async (
+    resultData: any,
+    passed: boolean,
+    scorePct: number,
+    isAutoSubmit: boolean,
+    attemptId: string
+  ) => {
+    const nowIso = new Date().toISOString();
+    setLastResultData(resultData);
+
+    if (passed) {
+      // 1. Insert gate_results: pass
+      await supabase.from('gate_results').insert({
+        candidate_id: candidateRecord.id,
+        gate_type: 'dt',
+        status: 'pass',
+        score: scorePct,
+        review_status: 'not_required',
+        attempt_number: resultData.attempt_number || currentAttempt?.attempt_number || 1,
+      });
+
+      // 2. Update candidates: in_progress, dt_passed_at = now(), reset dt_consecutive_fails = 0
+      // Note: dt_total_fails_in_window is NOT reset on pass (only on cooling)
+      await supabase
+        .from('candidates')
+        .update({
+          status: 'in_progress',
+          dt_passed_at: nowIso,
+          dt_consecutive_fails: 0,
+        })
+        .eq('id', candidateRecord.id);
+
+      setCandidateRecord((prev: any) => ({
+        ...prev,
+        status: 'in_progress',
+        dt_passed_at: nowIso,
+        dt_consecutive_fails: 0,
+      }));
+
+      // 3. Notification for candidate
+      if (candidateRecord.user_id) {
+        await supabase.from('notifications').insert({
+          user_id: candidateRecord.user_id,
+          title: 'Diagnostic Test Passed',
+          message: `You scored ${scorePct}% and passed the Diagnostic Test. Complete your profile and upload documents to continue.`,
+          type: 'gate_result',
+          read: false,
+        });
+      }
+
+      // 4. Notification for assigned RM
+      const candidateName = `${candidateRecord.first_name || ''} ${candidateRecord.last_name || ''}`.trim() || 'Candidate';
+      await notifyAssignedRm(
+        'Candidate Passed Diagnostic Test',
+        `${candidateName} passed their Diagnostic Test with ${scorePct}%. Begin document review when ready.`
+      );
+
+      // 5. Notification for placement leads
+      const { data: leadProfiles } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('internal_role', 'placement_lead');
+
+      if (leadProfiles && leadProfiles.length > 0) {
+        const leadNotifs = leadProfiles.map((p) => ({
+          user_id: p.id,
+          title: 'Candidate Passed Diagnostic Test',
+          message: `${candidateName} passed their Diagnostic Test with ${scorePct}%. Begin document review when ready.`,
+          type: 'gate_result',
+          read: false,
+        }));
+        await supabase.from('notifications').insert(leadNotifs);
+      }
+
+      setShowConfirmModal(false);
+      if (isAutoSubmit) {
+        setTimeout(() => {
+          setIsTimeUpOverlayOpen(false);
+          setScreen('pass_result');
+        }, 2000);
+      } else {
+        setScreen('pass_result');
+      }
+    } else {
+      // --- FAILED FLOW ---
+      // STEP 1: Record attempt in gate_results
+      await supabase.from('gate_results').insert({
+        candidate_id: candidateRecord.id,
+        gate_type: 'dt',
+        status: 'fail',
+        score: scorePct,
+        attempt_number: resultData.attempt_number || currentAttempt?.attempt_number || 1,
+      });
+
+      // STEP 2: Update fail counters
+      const prevAttemptCount = candidateRecord.dt_attempt_count ?? 0;
+      const prevConsecutive = candidateRecord.dt_consecutive_fails ?? 0;
+      const prevTotalWindow = candidateRecord.dt_total_fails_in_window ?? 0;
+
+      const newAttemptCount = prevAttemptCount + 1;
+      const newConsecutive = prevConsecutive + 1;
+      const newTotalWindow = prevTotalWindow + 1;
+
+      await supabase
+        .from('candidates')
+        .update({
+          dt_attempt_count: newAttemptCount,
+          dt_consecutive_fails: newConsecutive,
+          dt_total_fails_in_window: newTotalWindow,
+        })
+        .eq('id', candidateRecord.id);
+
+      const candidateName = `${candidateRecord.first_name || ''} ${candidateRecord.last_name || ''}`.trim() || 'Candidate';
+
+      // STEP 3: Check cooling triggers in order
+      if (newAttemptCount >= 10) {
+        // TRIGGER CHECK A: Round exhausted (all 10 attempts used)
+        const endsAtDate = new Date();
+        endsAtDate.setDate(endsAtDate.getDate() + 14);
+
+        const { data: coolingRow } = await supabase
+          .from('cooling_periods')
+          .insert({
+            candidate_id: candidateRecord.id,
+            gate_type: 'dt',
+            started_at: nowIso,
+            cooling_duration_days: 14,
+            ends_at: endsAtDate.toISOString(),
+            status: 'active',
+            triggered_by_attempt_id: attemptId,
+            cooling_trigger: 'round_exhausted',
+          })
+          .select()
+          .single();
+
+        // Reset fail counters for new round (attempt_count resets after cooling expires)
+        await supabase
+          .from('candidates')
+          .update({
+            dt_consecutive_fails: 0,
+            dt_total_fails_in_window: 0,
+          })
+          .eq('id', candidateRecord.id);
+
+        setCandidateRecord((prev: any) => ({
+          ...prev,
+          dt_attempt_count: newAttemptCount,
+          dt_consecutive_fails: 0,
+          dt_total_fails_in_window: 0,
+        }));
+        setActiveCoolingPeriod(coolingRow);
+
+        await pushDtOfferings();
+
+        if (candidateRecord.user_id) {
+          await supabase.from('notifications').insert({
+            user_id: candidateRecord.user_id,
+            title: 'Diagnostic Test — All Attempts Used',
+            message:
+              'You have used all 10 attempts for this round. A 14-day break applies. Training options are available below. A fresh set of 10 attempts will be available once the break ends.',
+            type: 'gate_result',
+            read: false,
+          });
+        }
+
+        await notifyAssignedRm(
+          'Candidate DT Cooling — round_exhausted',
+          `${candidateName} has used all 10 DT attempts without passing. 14-day cooling period applied.`
+        );
+
+        setShowConfirmModal(false);
+        if (isAutoSubmit) {
+          setTimeout(() => {
+            setIsTimeUpOverlayOpen(false);
+            setScreen('cooling_active');
+          }, 2000);
+        } else {
+          setScreen('cooling_active');
+        }
+      } else if (newConsecutive >= 3) {
+        // TRIGGER CHECK B: 3 consecutive fails
+        const endsAtDate = new Date();
+        endsAtDate.setDate(endsAtDate.getDate() + 10);
+
+        const { data: coolingRow } = await supabase
+          .from('cooling_periods')
+          .insert({
+            candidate_id: candidateRecord.id,
+            gate_type: 'dt',
+            started_at: nowIso,
+            cooling_duration_days: 10,
+            ends_at: endsAtDate.toISOString(),
+            status: 'active',
+            triggered_by_attempt_id: attemptId,
+            cooling_trigger: '3_consecutive',
+          })
+          .select()
+          .single();
+
+        // Reset fail counters (dt_attempt_count is NOT reset here)
+        await supabase
+          .from('candidates')
+          .update({
+            dt_consecutive_fails: 0,
+            dt_total_fails_in_window: 0,
+          })
+          .eq('id', candidateRecord.id);
+
+        setCandidateRecord((prev: any) => ({
+          ...prev,
+          dt_attempt_count: newAttemptCount,
+          dt_consecutive_fails: 0,
+          dt_total_fails_in_window: 0,
+        }));
+        setActiveCoolingPeriod(coolingRow);
+
+        await pushDtOfferings();
+
+        if (candidateRecord.user_id) {
+          await supabase.from('notifications').insert({
+            user_id: candidateRecord.user_id,
+            title: 'Diagnostic Test — Break Required',
+            message:
+              'You have not passed 3 attempts in a row. A 10-day break applies before your next attempt. Training options are available to help you prepare.',
+            type: 'gate_result',
+            read: false,
+          });
+        }
+
+        await notifyAssignedRm(
+          'Candidate DT Cooling — 3_consecutive',
+          `${candidateName} failed the DT 3 times consecutively. 10-day cooling period applied.`
+        );
+
+        setShowConfirmModal(false);
+        if (isAutoSubmit) {
+          setTimeout(() => {
+            setIsTimeUpOverlayOpen(false);
+            setScreen('cooling_active');
+          }, 2000);
+        } else {
+          setScreen('cooling_active');
+        }
+      } else if (newTotalWindow >= 5) {
+        // TRIGGER CHECK C: 5 total fails in window
+        const endsAtDate = new Date();
+        endsAtDate.setDate(endsAtDate.getDate() + 10);
+
+        const { data: coolingRow } = await supabase
+          .from('cooling_periods')
+          .insert({
+            candidate_id: candidateRecord.id,
+            gate_type: 'dt',
+            started_at: nowIso,
+            cooling_duration_days: 10,
+            ends_at: endsAtDate.toISOString(),
+            status: 'active',
+            triggered_by_attempt_id: attemptId,
+            cooling_trigger: '5_total',
+          })
+          .select()
+          .single();
+
+        // Reset fail counters
+        await supabase
+          .from('candidates')
+          .update({
+            dt_consecutive_fails: 0,
+            dt_total_fails_in_window: 0,
+          })
+          .eq('id', candidateRecord.id);
+
+        setCandidateRecord((prev: any) => ({
+          ...prev,
+          dt_attempt_count: newAttemptCount,
+          dt_consecutive_fails: 0,
+          dt_total_fails_in_window: 0,
+        }));
+        setActiveCoolingPeriod(coolingRow);
+
+        await pushDtOfferings();
+
+        if (candidateRecord.user_id) {
+          await supabase.from('notifications').insert({
+            user_id: candidateRecord.user_id,
+            title: 'Diagnostic Test — Break Required',
+            message:
+              'You have used 5 attempts without passing. A 10-day break applies before your next attempt. Training options are available below.',
+            type: 'gate_result',
+            read: false,
+          });
+        }
+
+        await notifyAssignedRm(
+          'Candidate DT Cooling — 5_total',
+          `${candidateName} has failed the DT 5 times in total. 10-day cooling period applied.`
+        );
+
+        setShowConfirmModal(false);
+        if (isAutoSubmit) {
+          setTimeout(() => {
+            setIsTimeUpOverlayOpen(false);
+            setScreen('cooling_active');
+          }, 2000);
+        } else {
+          setScreen('cooling_active');
+        }
+      } else {
+        // TRIGGER CHECK D: No trigger -> Normal fail screen
+        setCandidateRecord((prev: any) => ({
+          ...prev,
+          dt_attempt_count: newAttemptCount,
+          dt_consecutive_fails: newConsecutive,
+          dt_total_fails_in_window: newTotalWindow,
+        }));
+
+        await pushDtOfferings();
+
+        if (candidateRecord.user_id) {
+          await supabase.from('notifications').insert({
+            user_id: candidateRecord.user_id,
+            title: `Diagnostic Test — Attempt ${newAttemptCount}`,
+            message: `You scored ${scorePct}%. You need 33% to pass. You have ${10 - newAttemptCount} attempts remaining before a preparation period applies. You can retake now or use the recommended training to prepare.`,
+            type: 'gate_result',
+            read: false,
+          });
+        }
+
+        setShowConfirmModal(false);
+        if (isAutoSubmit) {
+          setTimeout(() => {
+            setIsTimeUpOverlayOpen(false);
+            setScreen('fail_result');
+          }, 2000);
+        } else {
+          setScreen('fail_result');
+        }
+      }
+    }
+  };
+
   // Handle in-progress attempt that expired while the candidate was away
   const handleAutoSubmitExpiredAway = async (inProgressAttempt: any) => {
     try {
       setIsTimeUpOverlayOpen(true);
-      // Wait 1 second as specified in Part 10 ("Show the Time's Up overlay briefly (1 second, no interaction needed)")
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       const { data: qData } = await supabase
@@ -535,47 +980,8 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         passed,
         auto_submitted: true,
       };
-      setLastResultData(resultData);
 
-      if (passed) {
-        await supabase.from('gate_results').insert({
-          candidate_id: candidateRecord.id,
-          gate_type: 'dt',
-          status: 'pass',
-          score: scorePct,
-          review_status: 'not_required',
-          attempt_number: resultData.attempt_number || inProgressAttempt.attempt_number,
-        });
-
-        await supabase
-          .from('candidates')
-          .update({ status: 'in_progress', dt_passed_at: nowIso })
-          .eq('id', candidateRecord.id);
-
-        setIsTimeUpOverlayOpen(false);
-        setScreen('pass_result');
-      } else {
-        await supabase.from('gate_results').insert({
-          candidate_id: candidateRecord.id,
-          gate_type: 'dt',
-          status: 'fail',
-          score: scorePct,
-          attempt_number: resultData.attempt_number || inProgressAttempt.attempt_number,
-        });
-
-        const currentCount = candidateRecord.dt_attempt_count ?? 0;
-        const newCount = currentCount + 1;
-
-        await supabase
-          .from('candidates')
-          .update({ dt_attempt_count: newCount })
-          .eq('id', candidateRecord.id);
-
-        setCandidateRecord({ ...candidateRecord, dt_attempt_count: newCount });
-
-        setIsTimeUpOverlayOpen(false);
-        setScreen('fail_result');
-      }
+      await completeTestAttempt(resultData, passed, scorePct, true, inProgressAttempt.id);
     } catch (err) {
       console.error('Error in handleAutoSubmitExpiredAway:', err);
       setIsTimeUpOverlayOpen(false);
@@ -728,258 +1134,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
       };
       setLastResultData(resultData);
 
-      // 4. Branch based on Passed vs Failed
-      if (passed) {
-        // a. Insert gate_results: pass
-        await supabase.from('gate_results').insert({
-          candidate_id: candidateRecord.id,
-          gate_type: 'dt',
-          status: 'pass',
-          score: scorePct,
-          review_status: 'not_required',
-          attempt_number: resultData.attempt_number || currentAttempt.attempt_number,
-        });
-
-        // b. Update candidates: in_progress, dt_passed_at = now()
-        await supabase
-          .from('candidates')
-          .update({
-            status: 'in_progress',
-            dt_passed_at: nowIso,
-          })
-          .eq('id', candidateRecord.id);
-
-        // c. Insert notification for candidate
-        if (candidateRecord.user_id) {
-          await supabase.from('notifications').insert({
-            user_id: candidateRecord.user_id,
-            title: 'Diagnostic Test Passed',
-            message: `You scored ${scorePct}% and passed the Diagnostic Test. Complete your profile and upload documents to continue.`,
-            type: 'gate_result',
-            read: false,
-          });
-        }
-
-        // d. Find assigned RM & send notification
-        const candidateName = `${candidateRecord.first_name || ''} ${candidateRecord.last_name || ''}`.trim() || 'Candidate';
-        if (candidateRecord.supplier_id) {
-          const { data: rmAssign } = await supabase
-            .from('rm_assignments')
-            .select('rm_profile_id')
-            .eq('entity_type', 'supplier')
-            .eq('entity_id', candidateRecord.supplier_id)
-            .eq('active', true)
-            .maybeSingle();
-
-          if (rmAssign?.rm_profile_id) {
-            await supabase.from('notifications').insert({
-              user_id: rmAssign.rm_profile_id,
-              title: 'Candidate Passed Diagnostic Test',
-              message: `${candidateName} passed their Diagnostic Test with ${scorePct}%. Begin document review when ready.`,
-              type: 'gate_result',
-              read: false,
-            });
-          }
-        } else {
-          // All profiles where internal_role = 'candidate_supplier_rm'
-          const { data: rmProfiles } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('internal_role', 'candidate_supplier_rm');
-
-          if (rmProfiles && rmProfiles.length > 0) {
-            const notifs = rmProfiles.map((p) => ({
-              user_id: p.id,
-              title: 'Candidate Passed Diagnostic Test',
-              message: `${candidateName} passed their Diagnostic Test with ${scorePct}%. Begin document review when ready.`,
-              type: 'gate_result',
-              read: false,
-            }));
-            await supabase.from('notifications').insert(notifs);
-          }
-        }
-
-        // e. Insert notification for placement_lead(s)
-        const { data: leadProfiles } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('internal_role', 'placement_lead');
-
-        if (leadProfiles && leadProfiles.length > 0) {
-          const leadNotifs = leadProfiles.map((p) => ({
-            user_id: p.id,
-            title: 'Candidate Passed Diagnostic Test',
-            message: `${candidateName} passed their Diagnostic Test with ${scorePct}%. Begin document review when ready.`,
-            type: 'gate_result',
-            read: false,
-          }));
-          await supabase.from('notifications').insert(leadNotifs);
-        }
-
-        // Refresh state & show pass screen
-        setShowConfirmModal(false);
-        if (isAutoSubmit) {
-          setTimeout(() => {
-            setIsTimeUpOverlayOpen(false);
-            setScreen('pass_result');
-          }, 2000);
-        } else {
-          setScreen('pass_result');
-        }
-      } else {
-        // --- FAILED FLOW ---
-        // a. Insert gate_results: fail
-        await supabase.from('gate_results').insert({
-          candidate_id: candidateRecord.id,
-          gate_type: 'dt',
-          status: 'fail',
-          score: scorePct,
-          attempt_number: resultData.attempt_number || currentAttempt.attempt_number,
-        });
-
-        // b. Update candidates: dt_attempt_count + 1
-        const currentCount = candidateRecord.dt_attempt_count ?? 0;
-        const newCount = currentCount + 1;
-
-        await supabase
-          .from('candidates')
-          .update({ dt_attempt_count: newCount })
-          .eq('id', candidateRecord.id);
-
-        setCandidateRecord({ ...candidateRecord, dt_attempt_count: newCount });
-
-        // d. Push offerings for 'dt'
-        const { data: dtOfferings } = await supabase
-          .from('offerings')
-          .select('id')
-          .eq('applicable_gate', 'dt')
-          .eq('is_active', true);
-
-        if (dtOfferings && dtOfferings.length > 0) {
-          const { data: existingOff } = await supabase
-            .from('candidate_offerings')
-            .select('offering_id')
-            .eq('candidate_id', candidateRecord.id);
-
-          const existingIds = new Set((existingOff || []).map((o) => o.offering_id));
-          const newRecommendations = dtOfferings
-            .filter((o) => !existingIds.has(o.id))
-            .map((o) => ({
-              candidate_id: candidateRecord.id,
-              offering_id: o.id,
-              gate_type_failed: 'dt',
-              status: 'recommended',
-            }));
-
-          if (newRecommendations.length > 0) {
-            await supabase.from('candidate_offerings').insert(newRecommendations);
-          }
-        }
-
-        // e & f. Notification & screen routing based on attempt count
-        const candidateName = `${candidateRecord.first_name || ''} ${candidateRecord.last_name || ''}`.trim() || 'Candidate';
-
-        if (newCount < 10) {
-          // Attempt 1-9
-          if (candidateRecord.user_id) {
-            await supabase.from('notifications').insert({
-              user_id: candidateRecord.user_id,
-              title: `Diagnostic Test — Attempt ${newCount}`,
-              message: `You scored ${scorePct}%. You need 33% to pass. You have ${10 - newCount} attempts remaining before a preparation period applies. You can retake now or use the recommended training to prepare.`,
-              type: 'gate_result',
-              read: false,
-            });
-          }
-          setShowConfirmModal(false);
-          if (isAutoSubmit) {
-            setTimeout(() => {
-              setIsTimeUpOverlayOpen(false);
-              setScreen('fail_result');
-            }, 2000);
-          } else {
-            setScreen('fail_result');
-          }
-        } else {
-          // Attempt 10: Activate 14-day cooling period
-          const endsAtDate = new Date();
-          endsAtDate.setDate(endsAtDate.getDate() + 14);
-
-          const { data: coolingRow } = await supabase
-            .from('cooling_periods')
-            .insert({
-              candidate_id: candidateRecord.id,
-              gate_type: 'dt',
-              started_at: nowIso,
-              cooling_duration_days: 14,
-              ends_at: endsAtDate.toISOString(),
-              status: 'active',
-              triggered_by_attempt_id: currentAttempt.id,
-            })
-            .select()
-            .single();
-
-          setActiveCoolingPeriod(coolingRow);
-
-          if (candidateRecord.user_id) {
-            await supabase.from('notifications').insert({
-              user_id: candidateRecord.user_id,
-              title: 'Diagnostic Test — Preparation Period Activated',
-              message: 'You have used all 10 attempts. A 14-day preparation period now applies. Complete the recommended training to prepare for your next round.',
-              type: 'gate_result',
-              read: false,
-            });
-          }
-
-          // Insert notification for RM(s)
-          const { data: rmProfiles } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('internal_role', 'candidate_supplier_rm');
-
-          if (rmProfiles && rmProfiles.length > 0) {
-            const rmNotifs = rmProfiles.map((p) => ({
-              user_id: p.id,
-              title: 'Candidate Reached DT Attempt Limit',
-              message: `${candidateName} has used all 10 Diagnostic Test attempts. A 14-day preparation period has been applied. Offerings have been recommended.`,
-              type: 'gate_result',
-              read: false,
-            }));
-            await supabase.from('notifications').insert(rmNotifs);
-          }
-
-          setShowConfirmModal(false);
-          if (isAutoSubmit) {
-            setTimeout(() => {
-              setIsTimeUpOverlayOpen(false);
-              setScreen('fail_result');
-            }, 2000);
-          } else {
-            setScreen('fail_result');
-          }
-        }
-      }
-
-      // Re-fetch fresh offerings list
-      const { data: refOff } = await supabase
-        .from('candidate_offerings')
-        .select(`
-          id,
-          offering_id,
-          gate_type_failed,
-          status,
-          offerings (
-            id,
-            name,
-            description,
-            type,
-            price,
-            applicable_gate
-          )
-        `)
-        .eq('candidate_id', candidateRecord.id)
-        .eq('gate_type_failed', 'dt');
-
-      setRecommendedOfferings(refOff || []);
+      await completeTestAttempt(resultData, passed, scorePct, isAutoSubmit, currentAttempt.id);
 
       // Re-fetch all attempts
       const { data: refreshedAttempts } = await supabase
@@ -1020,35 +1175,16 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     }
   };
 
-  // --------------------------------------------------------------------------
-  // UNLOCK NEXT ATTEMPTS (After cooling expired and offering availed)
-  // --------------------------------------------------------------------------
-  const handleUnlockNextRound = async () => {
-    if (!candidateRecord?.id) return;
-    try {
-      setScreen('loading');
-      await supabase
-        .from('candidates')
-        .update({ dt_attempt_count: 0 })
-        .eq('id', candidateRecord.id);
-
-      setCandidateRecord({ ...candidateRecord, dt_attempt_count: 0 });
-      setScreen('intro');
-    } catch (err) {
-      console.error('Error unlocking next round:', err);
-      setScreen('intro');
-    }
-  };
 
   // Helper: format countdown
   const getRemainingDaysAndHours = (endsAtStr?: string) => {
-    if (!endsAtStr) return '14 days 0 hours';
+    if (!endsAtStr) return '0 days 0 hours remaining';
     const endsAt = new Date(endsAtStr).getTime();
     const now = new Date().getTime();
     const diff = Math.max(0, endsAt - now);
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
     const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-    return `${days} days ${hours} hours`;
+    return `${days} days ${hours} hours remaining`;
   };
 
   // --------------------------------------------------------------------------
@@ -1058,7 +1194,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     const total = 10;
     const clampedUsed = Math.min(total, Math.max(0, usedCount));
     return (
-      <div className="flex items-center space-x-1.5 my-3">
+      <div className="flex items-center space-x-1.5 my-2">
         {Array.from({ length: total }).map((_, idx) => {
           const isUsed = idx < clampedUsed;
           if (isTenFails) {
@@ -1074,14 +1210,92 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             <div
               key={idx}
               className={`w-3.5 h-3.5 rounded-full transition-all ${
-                isUsed
-                  ? 'bg-slate-500'
-                  : 'border-2 border-slate-300 bg-white'
+                isUsed ? 'bg-slate-600' : 'border-2 border-slate-300 bg-white'
               }`}
               title={`Attempt ${idx + 1}: ${isUsed ? 'Used' : 'Remaining'}`}
             />
           );
         })}
+      </div>
+    );
+  };
+
+  // --------------------------------------------------------------------------
+  // RENDER FAIL INDICATORS (Consecutive fails & Total fails dots)
+  // --------------------------------------------------------------------------
+  const renderFailIndicators = (consecutive: number, totalInWindow: number) => {
+    const isConsecutiveClose = consecutive === 2;
+    const isTotalClose = totalInWindow === 4;
+
+    let warningText: string | null = null;
+    if (isConsecutiveClose && isTotalClose) {
+      warningText = 'One more fail applies a 10-day break.';
+    } else if (isConsecutiveClose) {
+      warningText = 'One more consecutive fail applies a 10-day break.';
+    } else if (isTotalClose) {
+      warningText = 'One more fail applies a 10-day break.';
+    }
+
+    return (
+      <div className="space-y-2 py-1">
+        <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs">
+          {/* Consecutive fails (3 max) */}
+          <div className="flex items-center space-x-2">
+            <span className="text-slate-600 font-medium">Consecutive fails:</span>
+            <div className="flex items-center space-x-1">
+              {[0, 1, 2].map((idx) => {
+                const filled = idx < consecutive;
+                let dotColor = 'bg-slate-200 border-slate-300';
+                if (filled) {
+                  dotColor = consecutive >= 2 ? 'bg-amber-500 border-amber-600' : 'bg-slate-700 border-slate-800';
+                }
+                return (
+                  <div
+                    key={idx}
+                    className={`w-2.5 h-2.5 rounded-full border transition-colors ${dotColor}`}
+                    title={`Consecutive fail ${idx + 1}`}
+                  />
+                );
+              })}
+            </div>
+            <span className="text-[11px] text-slate-400 font-mono">({consecutive}/3)</span>
+          </div>
+
+          {/* Total fails in window (5 max) */}
+          <div className="flex items-center space-x-2">
+            <span className="text-slate-600 font-medium">Total fails:</span>
+            <div className="flex items-center space-x-1">
+              {[0, 1, 2, 3, 4].map((idx) => {
+                const filled = idx < totalInWindow;
+                let dotColor = 'bg-slate-200 border-slate-300';
+                if (filled) {
+                  dotColor =
+                    totalInWindow >= 4
+                      ? 'bg-rose-500 border-rose-600'
+                      : totalInWindow >= 3
+                      ? 'bg-amber-500 border-amber-600'
+                      : 'bg-slate-700 border-slate-800';
+                }
+                return (
+                  <div
+                    key={idx}
+                    className={`w-2.5 h-2.5 rounded-full border transition-colors ${dotColor}`}
+                    title={`Total fail ${idx + 1}`}
+                  />
+                );
+              })}
+            </div>
+            <span className="text-[11px] text-slate-400 font-mono">({totalInWindow}/5)</span>
+          </div>
+        </div>
+
+        {warningText && (
+          <div className="text-center pt-0.5">
+            <p className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-[6px] px-3 py-1.5 inline-block">
+              {warningText}
+            </p>
+          </div>
+        )}
       </div>
     );
   };
@@ -1334,30 +1548,22 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   }
 
   // --------------------------------------------------------------------------
-  // SCREEN: FAIL RESULT (Attempts 1-9 or Attempt 10)
+  // SCREEN: FAIL RESULT (No cooling triggered)
   // --------------------------------------------------------------------------
   if (screen === 'fail_result') {
     const currentAttemptCount = candidateRecord?.dt_attempt_count ?? 1;
-    const isTenFails = currentAttemptCount >= 10;
     const correctCount = lastResultData?.correct_answers ?? 0;
     const scorePct = lastResultData?.score_pct ?? Math.round((correctCount / 15) * 10000) / 100;
     const remainingAttempts = Math.max(0, 10 - currentAttemptCount);
-    const hasAvailedOffering = recommendedOfferings.some((o) => o.status === 'availed');
 
     return (
       <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-12">
         <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-8 shadow-[0_1px_4px_rgba(27,50,112,0.08)] space-y-6">
           {/* Header & Icon */}
           <div className="text-center space-y-2">
-            {isTenFails ? (
-              <div className="w-16 h-16 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto ring-8 ring-rose-50/60">
-                <AlertCircle size={48} />
-              </div>
-            ) : (
-              <div className="w-14 h-14 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center mx-auto ring-6 ring-amber-50/60">
-                <XCircle size={40} />
-              </div>
-            )}
+            <div className="w-14 h-14 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center mx-auto ring-6 ring-amber-50/60">
+              <XCircle size={40} />
+            </div>
 
             <div className="text-4xl font-extrabold text-[#1B3270] my-2">
               {scorePct}%
@@ -1379,27 +1585,16 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             )}
 
             {/* Attempt Circles & Remaining Attempts */}
-            {!isTenFails ? (
-              <div className="flex flex-col items-center pt-1 space-y-1">
-                <span className="text-xs text-[#94A3B8]">
-                  {remainingAttempts} attempt{remainingAttempts === 1 ? '' : 's'} remaining
-                </span>
-                {renderAttemptCircles(currentAttemptCount, false)}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center pt-1 space-y-3">
-                {renderAttemptCircles(10, true)}
-
-                {/* ONE AMBER BANNER FOR ATTEMPT 10 */}
-                <div className="p-4 bg-amber-50 border border-amber-200 rounded-[8px] text-xs text-amber-900 leading-relaxed text-left w-full">
-                  Preparation period active until {activeCoolingPeriod?.ends_at ? formatDate(activeCoolingPeriod.ends_at) : '14 days from now'}. Complete at least one training option to unlock your next round.
-                </div>
-
-                <div className="p-2.5 bg-slate-50 rounded border border-[#E2E8F4] text-xs font-semibold text-[#1B3270] inline-block">
-                  Countdown: {getRemainingDaysAndHours(activeCoolingPeriod?.ends_at)}
-                </div>
-              </div>
-            )}
+            <div className="flex flex-col items-center pt-1 space-y-2">
+              <span className="text-xs text-[#94A3B8]">
+                {remainingAttempts} attempt{remainingAttempts === 1 ? '' : 's'} remaining in this round
+              </span>
+              {renderAttemptCircles(currentAttemptCount, false)}
+              {renderFailIndicators(
+                candidateRecord?.dt_consecutive_fails ?? 0,
+                candidateRecord?.dt_total_fails_in_window ?? 0
+              )}
+            </div>
           </div>
 
           {/* Difficulty breakdown */}
@@ -1420,26 +1615,12 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             Review My Answers →
           </button>
 
-          {/* OFFERINGS SECTION */}
+          {/* OFFERINGS SECTION (optional, non-blocking) */}
           {recommendedOfferings.length > 0 && (
             <div className="border-t border-[#E2E8F4] pt-5 space-y-4">
               <div>
-                <h3 className="text-sm font-bold text-[#1B3270]">
-                  {isTenFails
-                    ? 'Complete Training to Unlock Your Next Round'
-                    : 'Training Options'}
-                </h3>
+                <h3 className="text-sm font-bold text-[#1B3270]">Training Options</h3>
               </div>
-
-              {hasAvailedOffering && isTenFails && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-[8px] flex items-center space-x-2 text-emerald-800 text-xs">
-                  <Check size={16} className="text-emerald-600 shrink-0" />
-                  <span>
-                    Training registered. Your next round will unlock once the preparation period ends on{' '}
-                    {activeCoolingPeriod?.ends_at ? formatDate(activeCoolingPeriod.ends_at) : 'the scheduled date'}.
-                  </span>
-                </div>
-              )}
 
               <div className="space-y-3">
                 {recommendedOfferings.map((item) => {
@@ -1449,7 +1630,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                   return (
                     <div
                       key={item.id}
-                      className="p-4 border border-[#E2E8F4] rounded-[8px] bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                      className="p-4 border border-[#E2E8F4] rounded-[8px] bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs"
                     >
                       <div className="space-y-1">
                         <div className="flex items-center space-x-2">
@@ -1477,8 +1658,8 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                       <div className="shrink-0">
                         {isAvailed ? (
                           <span className="inline-flex items-center text-xs font-semibold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-[6px] border border-emerald-200">
-                            <Check size={14} className="mr-1" />
-                            Registered
+                            <Check size={14} className="mr-1 text-emerald-600" />
+                            Enrolled ✓
                           </span>
                         ) : (
                           <button
@@ -1498,19 +1679,17 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             </div>
           )}
 
-          {/* RETAKE TEST BUTTON (For attempts 1-9) */}
-          {!isTenFails && (
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleStartTest}
-                className="w-full py-3 px-4 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold rounded-[6px] transition-colors shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
-              >
-                <RotateCcw size={15} />
-                <span>Retake Test</span>
-              </button>
-            </div>
-          )}
+          {/* RETAKE TEST BUTTON */}
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={handleStartTest}
+              className="w-full py-3 px-4 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold rounded-[6px] transition-colors shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
+            >
+              <RotateCcw size={15} />
+              <span>Retake Test</span>
+            </button>
+          </div>
         </div>
 
         {/* ATTEMPT HISTORY */}
@@ -1520,157 +1699,161 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   }
 
   // --------------------------------------------------------------------------
-  // SCREEN: COOLING PERIOD ACTIVE
+  // SCREEN: COOLING PERIOD ACTIVE (Triggered immediately or returning)
   // --------------------------------------------------------------------------
   if (screen === 'cooling_active') {
-    const hasAvailed = recommendedOfferings.some((o) => o.status === 'availed');
+    const trigger = activeCoolingPeriod?.cooling_trigger;
+    const isConsecutiveTrigger = trigger === '3_consecutive';
+    const isTotalTrigger = trigger === '5_total';
+    const isRoundExhausted = trigger === 'round_exhausted';
+
+    // Distinguish immediate trigger screen vs returning candidate
+    const isImmediate = Boolean(
+      lastResultData &&
+        activeCoolingPeriod?.triggered_by_attempt_id &&
+        lastResultData.id === activeCoolingPeriod.triggered_by_attempt_id
+    );
+
+    let heading = 'Break Required';
+    let subtitle = 'A preparation break now applies.';
+
+    if (isConsecutiveTrigger) {
+      heading = isImmediate
+        ? '3 Consecutive Fails — Break Required'
+        : 'Break active — consecutive fail limit reached';
+      subtitle = 'You have not passed 3 attempts in a row. A 10-day preparation break now applies.';
+    } else if (isTotalTrigger) {
+      heading = isImmediate
+        ? '5 Fails This Round — Break Required'
+        : 'Break active — total fail limit reached';
+      subtitle = 'You have used 5 attempts without passing. A 10-day preparation break now applies.';
+    } else if (isRoundExhausted) {
+      heading = isImmediate
+        ? 'All 10 Attempts Used — Break Required'
+        : 'Break active — all 10 attempts used';
+      subtitle =
+        'You have used all 10 attempts for this round. A 14-day preparation break now applies. A fresh set of 10 attempts will be available once the break ends.';
+    }
+
+    const currentAttemptsUsed = isRoundExhausted ? 10 : (candidateRecord?.dt_attempt_count ?? 0);
+    const remainingAttemptsAfterBreak = Math.max(0, 10 - currentAttemptsUsed);
 
     return (
       <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-12">
         <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-8 shadow-[0_1px_4px_rgba(27,50,112,0.08)] space-y-6 text-center">
-          <div className="w-16 h-16 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto ring-8 ring-rose-50/60">
-            <Clock size={40} />
+          {/* Amber icon for mid-round; rose/alert icon for round exhausted */}
+          <div
+            className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto ring-8 ${
+              isRoundExhausted
+                ? 'bg-rose-50 text-rose-600 ring-rose-50/60'
+                : 'bg-amber-50 text-amber-600 ring-amber-50/60'
+            }`}
+          >
+            <AlertCircle size={40} />
           </div>
 
-          <div>
-            <p className="text-xs text-[#94A3B8] mb-1">Next attempt available in:</p>
-            <div className="p-3 bg-slate-50 rounded-[8px] border border-[#E2E8F4] text-base font-bold text-[#1B3270] inline-block">
+          <div className="space-y-1.5">
+            <h2 className="text-xl font-bold text-[#1B3270]">{heading}</h2>
+            <p className="text-xs text-[#4A5568] max-w-md mx-auto leading-relaxed">{subtitle}</p>
+
+            {/* Last attempt score shown once (small, muted) */}
+            {lastResultData && lastResultData.score_pct !== undefined && lastResultData.score_pct !== null && (
+              <p className="text-xs text-slate-400 pt-1">
+                Last attempt score: {lastResultData.score_pct}% ({lastResultData.correct_answers ?? 0}/15 correct)
+              </p>
+            )}
+          </div>
+
+          {/* BREAK COUNTDOWN CARD */}
+          <div className="p-4 bg-slate-50 border border-[#E2E8F4] rounded-[8px] space-y-1">
+            <div className="text-xs text-slate-500">
+              Break ends on {activeCoolingPeriod?.ends_at ? formatDate(activeCoolingPeriod.ends_at) : 'scheduled date'}
+            </div>
+            <div className="text-base font-bold text-[#1B3270]">
               {getRemainingDaysAndHours(activeCoolingPeriod?.ends_at)}
             </div>
           </div>
 
-          {/* Training status */}
-          <div className="text-left">
-            {!hasAvailed ? (
-              <div className="p-4 bg-amber-50 border border-amber-200 rounded-[8px] text-xs text-amber-900 leading-relaxed">
-                Complete at least one training option to unlock your next round.
-              </div>
+          {/* ATTEMPTS STATUS */}
+          <div className="p-3 bg-blue-50/50 border border-blue-100 rounded-[8px] text-xs text-[#1B3270] font-medium text-center">
+            {isRoundExhausted ? (
+              <span>A fresh 10 attempts will be available after break ends.</span>
             ) : (
-              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-[8px] flex items-center space-x-2 text-emerald-800 text-xs font-medium">
-                <Check size={16} className="text-emerald-600 shrink-0" />
-                <span>Training registered. Attempts will unlock when the countdown ends.</span>
-              </div>
+              <span>
+                {currentAttemptsUsed} of 10 attempts used. {remainingAttemptsAfterBreak} remaining after break.
+              </span>
             )}
           </div>
 
-          {/* Offerings list */}
+          {/* OFFERINGS (non-blocking) */}
           {recommendedOfferings.length > 0 && (
-            <div className="text-left space-y-3 pt-2">
-              <h4 className="text-xs font-bold text-[#1B3270] uppercase tracking-wider">
-                Training Options
-              </h4>
-            {recommendedOfferings.map((item) => (
-              <div
-                key={item.id}
-                className="p-3.5 border border-[#E2E8F4] rounded-[8px] bg-slate-50 flex items-center justify-between gap-4 text-xs"
-              >
-                <div>
-                  <span className="font-bold text-[#1B3270] block">
-                    {item.offerings?.name}
-                  </span>
-                  <span className="text-slate-500 text-[11px]">
-                    {item.offerings?.description}
-                  </span>
-                </div>
-                <div>
-                  {item.status === 'availed' ? (
-                    <span className="px-2.5 py-1 rounded bg-emerald-100 text-emerald-800 text-[11px] font-bold">
-                      Registered
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={actionLoadingId === item.id}
-                      onClick={() => handleAvailOffering(item.id)}
-                      className="px-3 py-1.5 bg-[#1B3270] hover:bg-[#2952A3] text-white rounded text-xs font-medium cursor-pointer"
-                    >
-                      {actionLoadingId === item.id ? 'Registering...' : 'Avail'}
-                    </button>
-                  )}
-                </div>
+            <div className="border-t border-[#E2E8F4] pt-5 space-y-4 text-left">
+              <div>
+                <h3 className="text-sm font-bold text-[#1B3270]">Use this time to prepare</h3>
+                <p className="text-xs text-[#4A5568] mt-0.5 leading-relaxed">
+                  Training options are available. Availing them is optional — your next attempt unlocks automatically when the break ends.
+                </p>
               </div>
-            ))}
-          </div>
-          )}
-        </div>
 
-        {renderAttemptHistory()}
-      </div>
-    );
-  }
+              <div className="space-y-3">
+                {recommendedOfferings.map((item) => {
+                  const off = item.offerings;
+                  const isAvailed = item.status === 'availed';
 
-  // --------------------------------------------------------------------------
-  // SCREEN: COMPLETE TRAINING FIRST
-  // --------------------------------------------------------------------------
-  if (screen === 'complete_training_first') {
-    const hasAvailed = recommendedOfferings.some((o) => o.status === 'availed');
-
-    return (
-      <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-12">
-        <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-8 shadow-[0_1px_4px_rgba(27,50,112,0.08)] space-y-6 text-center">
-          <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto ring-8 ring-emerald-50/60">
-            <CheckCircle2 size={44} />
-          </div>
-
-          <div>
-            <h2 className="text-xl font-bold text-[#1B3270]">
-              14-Day Preparation Period Complete
-            </h2>
-            <p className="text-xs text-[#4A5568] mt-2 leading-relaxed max-w-md mx-auto">
-              Your preparation period has ended. To unlock your next round of attempts, complete at least one recommended training option below.
-            </p>
-          </div>
-
-          <div className="text-left space-y-3">
-            <h4 className="text-xs font-bold text-[#1B3270] uppercase tracking-wider">
-              Training Options
-            </h4>
-            {recommendedOfferings.map((item) => (
-              <div
-                key={item.id}
-                className="p-4 border border-[#E2E8F4] rounded-[8px] bg-slate-50 flex items-center justify-between gap-4 text-xs"
-              >
-                <div>
-                  <span className="font-bold text-[#1B3270] block">
-                    {item.offerings?.name}
-                  </span>
-                  <span className="text-slate-500 text-[11px]">
-                    {item.offerings?.description}
-                  </span>
-                </div>
-                <div>
-                  {item.status === 'availed' ? (
-                    <span className="px-3 py-1 rounded bg-emerald-100 text-emerald-800 text-xs font-bold">
-                      Registered
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={actionLoadingId === item.id}
-                      onClick={() => handleAvailOffering(item.id)}
-                      className="px-4 py-2 bg-[#1B3270] hover:bg-[#2952A3] text-white rounded text-xs font-medium cursor-pointer"
+                  return (
+                    <div
+                      key={item.id}
+                      className="p-4 border border-[#E2E8F4] rounded-[8px] bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs"
                     >
-                      {actionLoadingId === item.id ? 'Registering...' : 'Avail'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center space-x-2">
+                          <h4 className="text-xs font-bold text-[#1B3270]">
+                            {off?.name || 'Training Course'}
+                          </h4>
+                          {off?.type && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 capitalize">
+                              {off.type.replace('_', ' ')}
+                            </span>
+                          )}
+                        </div>
+                        {off?.description && (
+                          <p className="text-xs text-[#4A5568] leading-relaxed">
+                            {off.description}
+                          </p>
+                        )}
+                        {off?.price !== undefined && (
+                          <span className="text-xs font-semibold text-[#2952A3] block">
+                            {off.price === 0 ? 'Free Access' : `€${off.price}`}
+                          </span>
+                        )}
+                      </div>
 
-          {hasAvailed && (
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleUnlockNextRound}
-                className="w-full py-3 px-4 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold rounded-[6px] transition-colors shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
-              >
-                <span>Unlock My Next Attempts →</span>
-              </button>
+                      <div className="shrink-0">
+                        {isAvailed ? (
+                          <span className="inline-flex items-center text-xs font-semibold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-[6px] border border-emerald-200">
+                            <Check size={14} className="mr-1 text-emerald-600" />
+                            Enrolled ✓
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={actionLoadingId === item.id}
+                            onClick={() => handleAvailOffering(item.id)}
+                            className="px-4 py-2 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-medium rounded-[6px] transition-colors cursor-pointer"
+                          >
+                            {actionLoadingId === item.id ? 'Registering...' : 'Avail'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
 
+        {/* Attempt History */}
         {renderAttemptHistory()}
       </div>
     );
@@ -1685,6 +1868,23 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
 
     return (
       <div className="space-y-6 max-w-xl mx-auto animate-in fade-in duration-150 pb-12">
+        {/* Toast if cooling just expired */}
+        {coolingExpiredToast && (
+          <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-[8px] flex items-center justify-between text-xs text-[#1B3270] shadow-xs">
+            <div className="flex items-center space-x-2 font-medium">
+              <Clock size={16} className="text-[#1B3270] shrink-0" />
+              <span>{coolingExpiredToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCoolingExpiredToast(null)}
+              className="text-slate-400 hover:text-slate-700 text-xs font-bold ml-2 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-8 shadow-[0_1px_4px_rgba(27,50,112,0.08)] space-y-6">
           <div className="flex items-center space-x-3">
             <div className="w-12 h-12 rounded-[8px] bg-[#1B3270]/10 flex items-center justify-center text-[#1B3270]">
@@ -1714,19 +1914,22 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             The test auto-submits when time runs out. Unanswered questions are marked incorrect.
           </p>
 
-          {/* Attempt Counter (if previous attempts) */}
+          {/* Attempt Counter (if previous attempts used in this round) */}
           {usedRoundCount > 0 && (
-            <div className="space-y-2">
+            <div className="space-y-2 text-center">
               <span className="text-xs font-semibold text-[#1B3270] block">
-                Attempt {usedRoundCount} of 10 used
+                Attempt {usedRoundCount + 1} of 10
               </span>
-              {renderAttemptCircles(usedRoundCount)}
+              {renderFailIndicators(
+                candidateRecord?.dt_consecutive_fails ?? 0,
+                candidateRecord?.dt_total_fails_in_window ?? 0
+              )}
             </div>
           )}
 
           {/* Previous result if any: "Last score: [score_pct]%" (One line, no extra context) */}
           {previousCompletedAttempt && (
-            <p className="text-xs text-[#4A5568]">
+            <p className="text-xs text-[#4A5568] text-center">
               Last score: {previousCompletedAttempt.score_pct}%
             </p>
           )}

@@ -341,7 +341,7 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
       if (candIds.length > 0) {
         const { data: coolingList } = await supabase
           .from('cooling_periods')
-          .select('candidate_id, end_date')
+          .select('candidate_id, ends_at, cooling_trigger')
           .eq('gate_type', 'dt')
           .eq('status', 'active')
           .in('candidate_id', candIds);
@@ -350,13 +350,25 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
           const c = candidateList.find((cand) => cand.id === cp.candidate_id);
           if (c) {
             const name = `${c.first_name || ''} ${c.last_name || ''}`.trim() || `Candidate #${c.id.slice(0, 6)}`;
+            let triggerDesc = 'cooling active';
+            if (cp.cooling_trigger === '3_consecutive') {
+              triggerDesc = 'DT cooling active (3 consecutive fails)';
+            } else if (cp.cooling_trigger === '5_total') {
+              triggerDesc = 'DT cooling active (5 total fails)';
+            } else if (cp.cooling_trigger === 'round_exhausted') {
+              triggerDesc = 'DT cooling active (all 10 attempts used)';
+            } else {
+              triggerDesc = `DT cooling active (${cp.cooling_trigger || 'cooling'})`;
+            }
+            const dateStr = cp.ends_at ? new Date(cp.ends_at).toLocaleDateString() : 'N/A';
+
             items.push({
               id: `dt-cooling-${c.id}`,
               type: 'dt_cooling',
               candidateId: c.id,
               candidateName: name,
               supplierName: (c.suppliers as any)?.company_name || 'Agency Partner',
-              detail: `DT cooling active until ${new Date(cp.end_date).toLocaleDateString()}`,
+              detail: `${name} — ${triggerDesc} — ends ${dateStr}`,
             });
           }
         });
@@ -382,14 +394,15 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
       candidateList.forEach((c) => {
         const name = `${c.first_name || ''} ${c.last_name || ''}`.trim() || `Candidate #${c.id.slice(0, 6)}`;
         const sup = c.suppliers as any;
-        if ((c.dt_attempt_count || 0) >= 10) {
+        const alreadyInCooling = items.some((it) => it.candidateId === c.id && it.type === 'dt_cooling');
+        if ((c.dt_attempt_count || 0) >= 10 && !alreadyInCooling) {
           items.push({
             id: `dt-limit-${c.id}`,
             type: 'dt_attempt_limit',
             candidateId: c.id,
             candidateName: name,
             supplierName: sup?.company_name || 'Agency Partner',
-            detail: 'Has used all 10 DT attempts. Cooling period active.',
+            detail: `${name} — DT cooling active (all 10 attempts used)`,
           });
         }
       });
@@ -849,7 +862,7 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
                       </button>
                     )}
 
-                    {(item.type === 'final_test_locked' || item.type === 'candidate_help') && (
+                    {(item.type === 'final_test_locked' || item.type === 'candidate_help' || item.type === 'dt_cooling') && (
                       <button
                         type="button"
                         onClick={() => onNavigateTab('my_candidates')}
@@ -860,8 +873,7 @@ export const CandidateRmOverviewTab: React.FC<CandidateRmOverviewTabProps> = ({
                       </button>
                     )}
 
-                    {(item.type === 'dt_cooling' ||
-                      item.type === 'dt_attempt_limit' ||
+                    {(item.type === 'dt_attempt_limit' ||
                       item.type === 'bulk_upload') && (
                       <span className="text-[11px] text-slate-500 font-medium px-2 py-0.5 rounded bg-slate-100 border border-slate-200">
                         Informational

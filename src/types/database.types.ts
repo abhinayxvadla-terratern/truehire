@@ -578,12 +578,15 @@ export type Database = {
       }
       candidates: {
         Row: {
+          assigned_rm_id: string | null
           can_apply_to_jobs: boolean | null
           cohort_id: string | null
           consecutive_final_test_fails: number | null
           created_at: string
           dt_attempt_count: number | null
+          dt_consecutive_fails: number | null
           dt_passed_at: string | null
+          dt_total_fails_in_window: number | null
           email: string | null
           final_test_locked: boolean | null
           first_name: string | null
@@ -602,12 +605,15 @@ export type Database = {
           user_id: string | null
         }
         Insert: {
+          assigned_rm_id?: string | null
           can_apply_to_jobs?: boolean | null
           cohort_id?: string | null
           consecutive_final_test_fails?: number | null
           created_at?: string
           dt_attempt_count?: number | null
+          dt_consecutive_fails?: number | null
           dt_passed_at?: string | null
+          dt_total_fails_in_window?: number | null
           email?: string | null
           final_test_locked?: boolean | null
           first_name?: string | null
@@ -626,12 +632,15 @@ export type Database = {
           user_id?: string | null
         }
         Update: {
+          assigned_rm_id?: string | null
           can_apply_to_jobs?: boolean | null
           cohort_id?: string | null
           consecutive_final_test_fails?: number | null
           created_at?: string
           dt_attempt_count?: number | null
+          dt_consecutive_fails?: number | null
           dt_passed_at?: string | null
+          dt_total_fails_in_window?: number | null
           email?: string | null
           final_test_locked?: boolean | null
           first_name?: string | null
@@ -803,6 +812,7 @@ export type Database = {
         Row: {
           candidate_id: string | null
           cooling_duration_days: number
+          cooling_trigger: string | null
           created_at: string | null
           ends_at: string
           gate_type: string
@@ -814,6 +824,7 @@ export type Database = {
         Insert: {
           candidate_id?: string | null
           cooling_duration_days: number
+          cooling_trigger?: string | null
           created_at?: string | null
           ends_at: string
           gate_type: string
@@ -825,6 +836,7 @@ export type Database = {
         Update: {
           candidate_id?: string | null
           cooling_duration_days?: number
+          cooling_trigger?: string | null
           created_at?: string | null
           ends_at?: string
           gate_type?: string

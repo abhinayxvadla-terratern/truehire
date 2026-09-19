@@ -32,6 +32,7 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
   const [documents, setDocuments] = useState<any[]>([]);
   const [dtAttempts, setDtAttempts] = useState<any[]>([]);
   const [activeCooling, setActiveCooling] = useState<any>(null);
+  const [coolingPeriodsList, setCoolingPeriodsList] = useState<any[]>([]);
   const [offeringsAvailed, setOfferingsAvailed] = useState(false);
   const [selectedAttemptIdForReview, setSelectedAttemptIdForReview] = useState<string | null>(null);
 
@@ -61,9 +62,12 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
           supabase.from('candidate_language_proficiency').select('*').eq('candidate_id', candidateId).maybeSingle(),
           supabase.from('documents').select('*').eq('candidate_id', candidateId),
           supabase.from('dt_attempts').select('*').eq('candidate_id', candidateId).order('attempt_number', { ascending: false }),
-          supabase.from('cooling_periods').select('*').eq('candidate_id', candidateId).eq('gate_type', 'dt').eq('status', 'active').maybeSingle(),
+          supabase.from('cooling_periods').select('*').eq('candidate_id', candidateId).eq('gate_type', 'dt').order('started_at', { ascending: false }),
           supabase.from('candidate_offerings').select('*').eq('candidate_id', candidateId).eq('gate_type_failed', 'dt').eq('status', 'availed'),
         ]);
+
+        const allCp = coolingRes.data || [];
+        const activeCp = allCp.find((cp: any) => cp.status === 'active' && new Date(cp.ends_at) > new Date()) || null;
 
         setCandidate(candRes.data);
         setPersonalInfo(pRes.data);
@@ -73,7 +77,8 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
         setLanguageProficiency(lpRes.data);
         setDocuments(docsRes.data || []);
         setDtAttempts(dtAttRes.data || []);
-        setActiveCooling(coolingRes.data || null);
+        setCoolingPeriodsList(allCp);
+        setActiveCooling(activeCp);
         setOfferingsAvailed((offRes.data || []).length > 0);
       } catch (err) {
         console.error('Error loading candidate profile details:', err);
@@ -463,24 +468,47 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
           </div>
         </div>
 
-        {/* 4 Summary Telemetry Tiles */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* 5 Summary Telemetry Tiles */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <div className="p-3 bg-slate-50 rounded-[6px] border border-[#E2E8F4]">
-            <span className="text-[10px] text-slate-400 block font-medium">Total All-Time Attempts</span>
-            <span className="text-base font-bold text-[#1B3270]">{dtAttempts.length}</span>
-          </div>
-
-          <div className="p-3 bg-slate-50 rounded-[6px] border border-[#E2E8F4]">
-            <span className="text-[10px] text-slate-400 block font-medium">Current Round</span>
+            <span className="text-[10px] text-slate-400 block font-medium">Attempt Count</span>
             <span className="text-base font-bold text-[#1B3270]">
               {candidate?.dt_attempt_count ?? 0} / 10
             </span>
           </div>
 
           <div className="p-3 bg-slate-50 rounded-[6px] border border-[#E2E8F4]">
+            <span className="text-[10px] text-slate-400 block font-medium">Consecutive Fails</span>
+            <span className="text-base font-bold text-[#1B3270]">
+              {candidate?.dt_consecutive_fails ?? 0}
+            </span>
+          </div>
+
+          <div className="p-3 bg-slate-50 rounded-[6px] border border-[#E2E8F4]">
+            <span className="text-[10px] text-slate-400 block font-medium">Total Fails (Window)</span>
+            <span className="text-base font-bold text-[#1B3270]">
+              {candidate?.dt_total_fails_in_window ?? 0}
+            </span>
+          </div>
+
+          <div className="p-3 bg-slate-50 rounded-[6px] border border-[#E2E8F4]">
             <span className="text-[10px] text-slate-400 block font-medium">Cooling Active</span>
             <span className="text-xs font-bold text-slate-800">
-              {activeCooling ? `Yes (ends ${formatDate(activeCooling.ends_at)})` : 'No'}
+              {activeCooling ? (
+                <>
+                  Yes —{' '}
+                  {activeCooling.cooling_trigger === '3_consecutive'
+                    ? '3 consecutive fails'
+                    : activeCooling.cooling_trigger === '5_total'
+                    ? '5 total fails'
+                    : activeCooling.cooling_trigger === 'round_exhausted'
+                    ? 'all 10 attempts used'
+                    : activeCooling.cooling_trigger || 'cooling active'}{' '}
+                  (ends {formatDate(activeCooling.ends_at)})
+                </>
+              ) : (
+                'No'
+              )}
             </span>
           </div>
 
@@ -529,6 +557,20 @@ export const CandidateProfileDetailView: React.FC<CandidateProfileDetailViewProp
                         {att.passed ? 'Pass' : 'Fail'}
                       </span>
                     )}
+                    {(() => {
+                      const cp = coolingPeriodsList.find((c) => c.triggered_by_attempt_id === att.id);
+                      if (!cp) return null;
+                      let badgeText = '';
+                      if (cp.cooling_trigger === '3_consecutive') badgeText = '3 consecutive';
+                      else if (cp.cooling_trigger === '5_total') badgeText = '5 total';
+                      else if (cp.cooling_trigger === 'round_exhausted') badgeText = 'Round exhausted';
+                      if (!badgeText) return null;
+                      return (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                          {badgeText}
+                        </span>
+                      );
+                    })()}
                     {att.started_at && (() => {
                       const startMs = new Date(att.started_at).getTime();
                       const endMs = att.completed_at ? new Date(att.completed_at).getTime() : Date.now();
