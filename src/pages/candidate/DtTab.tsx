@@ -6,6 +6,7 @@ import {
   XCircle,
   Clock,
   ArrowRight,
+  ArrowLeft,
   RotateCcw,
   ChevronDown,
   ChevronUp,
@@ -56,6 +57,8 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   const [recommendedOfferings, setRecommendedOfferings] = useState<any[]>([]);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [showExitModal, setShowExitModal] = useState(false);
+  const [showRestartModal, setShowRestartModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [reviewAttemptId, setReviewAttemptId] = useState<string | null>(null);
   const [reviewInitialFilter, setReviewInitialFilter] = useState<string>('all');
@@ -1245,6 +1248,40 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   };
 
   // --------------------------------------------------------------------------
+  // RESTART TEST (Always from start: Question 1, fresh 30-min timer)
+  // --------------------------------------------------------------------------
+  const handleRestartTest = async () => {
+    setShowRestartModal(false);
+    if (!candidateRecord?.id) return;
+    try {
+      setScreen('loading');
+
+      if (currentAttempt?.id) {
+        await supabase
+          .from('dt_attempts')
+          .update({
+            status: 'abandoned',
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', currentAttempt.id);
+        await supabase.from('dt_answers').delete().eq('attempt_id', currentAttempt.id);
+      }
+
+      setSelectedAnswers({});
+      setCurrentQIndex(0);
+      setTimerRemainingSeconds(1800);
+      hasTriggeredFiveMinWarning.current = false;
+      hasTriggeredOneMinWarning.current = false;
+      autoSubmittingRef.current = false;
+
+      await handleStartTest();
+    } catch (err) {
+      console.error('Error restarting test:', err);
+      setScreen('intro');
+    }
+  };
+
+  // --------------------------------------------------------------------------
   // TEST SUBMISSION & AUTOMATED SCORING (Manual & Auto-Submit)
   // --------------------------------------------------------------------------
   const handleSubmitTest = async (isAutoSubmit = false) => {
@@ -1562,35 +1599,64 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                   </span>
                 </div>
 
-                <div className="flex items-center space-x-3">
+                <div className="flex items-center space-x-2">
                   {att.status === 'completed' ? (
-                    att.passed ? (
-                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                        Pass
-                      </span>
-                    ) : (
-                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                        Fail
-                      </span>
-                    )
-                  ) : (
-                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                      In Progress
-                    </span>
-                  )}
+                    <>
+                      {att.passed ? (
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          Pass
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                          Fail
+                        </span>
+                      )}
 
-                  {att.status === 'completed' && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setReviewAttemptId(att.id);
-                        setReviewInitialFilter('all');
-                        setScreen('question_review');
-                      }}
-                      className="text-xs font-semibold text-[#2952A3] hover:underline"
-                    >
-                      Review
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLastResultData(att);
+                          if (att.passed) {
+                            setScreen('pass_result');
+                          } else {
+                            setScreen('fail_result');
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded-[6px] bg-[#1B3270]/5 hover:bg-[#1B3270]/10 text-[#1B3270] text-xs font-semibold transition-colors cursor-pointer"
+                        title="View score and difficulty breakdown"
+                      >
+                        Performance
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReviewAttemptId(att.id);
+                          setReviewInitialFilter('all');
+                          setScreen('question_review');
+                        }}
+                        className="text-xs font-semibold text-[#2952A3] hover:underline cursor-pointer px-1 py-1"
+                        title="Review questions and answers"
+                      >
+                        Review
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                        In Progress
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await loadQuestionsAndResume(att.id);
+                          setScreen('test');
+                        }}
+                        className="px-2.5 py-1 rounded-[6px] bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        Resume
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -1716,10 +1782,58 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
   if (screen === 'pass_result') {
     const correctCount = lastResultData?.correct_answers ?? 5;
     const scorePct = lastResultData?.score_pct ?? Math.round((correctCount / 15) * 10000) / 100;
+    const completedList = allAttempts.filter((a) => a.status === 'completed');
 
     return (
       <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-12">
+        {/* Navigation & Header */}
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setScreen('intro')}
+            className="inline-flex items-center space-x-1.5 text-xs font-semibold text-[#1B3270] hover:text-[#2952A3] p-1.5 rounded-[6px] hover:bg-slate-100 transition-colors cursor-pointer"
+          >
+            <ArrowLeft size={16} />
+            <span>Back to Overview</span>
+          </button>
+        </div>
+
         <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-8 shadow-[0_1px_4px_rgba(27,50,112,0.08)] text-center space-y-5">
+          {/* Attempt Selector Switcher */}
+          {completedList.length > 1 && (
+            <div className="p-2.5 bg-slate-50 border border-[#E2E8F4] rounded-[8px] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-left">
+              <span className="text-xs text-[#4A5568] font-medium">
+                Viewing Attempt {lastResultData?.attempt_number}
+              </span>
+              <div className="flex items-center space-x-1.5 flex-wrap gap-1">
+                {completedList.map((att) => {
+                  const isSelected = lastResultData?.id === att.id;
+                  return (
+                    <button
+                      key={att.id}
+                      type="button"
+                      onClick={() => {
+                        setLastResultData(att);
+                        if (att.passed) {
+                          setScreen('pass_result');
+                        } else {
+                          setScreen('fail_result');
+                        }
+                      }}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-[6px] transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#1B3270] text-white shadow-2xs'
+                          : 'bg-white border border-[#E2E8F4] text-[#4A5568] hover:bg-slate-100'
+                      }`}
+                    >
+                      Attempt {att.attempt_number} ({att.score_pct}%)
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="w-16 h-16 rounded-full bg-emerald-50 text-[#10B981] flex items-center justify-center mx-auto ring-8 ring-emerald-50/60">
             <CheckCircle2 size={48} />
           </div>
@@ -1788,10 +1902,58 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
     const correctCount = lastResultData?.correct_answers ?? 0;
     const scorePct = lastResultData?.score_pct ?? Math.round((correctCount / 15) * 10000) / 100;
     const remainingAttempts = Math.max(0, 10 - currentAttemptCount);
+    const completedList = allAttempts.filter((a) => a.status === 'completed');
 
     return (
       <div className="space-y-6 max-w-2xl mx-auto animate-in fade-in duration-150 pb-12">
+        {/* Navigation & Header */}
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setScreen('intro')}
+            className="inline-flex items-center space-x-1.5 text-xs font-semibold text-[#1B3270] hover:text-[#2952A3] p-1.5 rounded-[6px] hover:bg-slate-100 transition-colors cursor-pointer"
+          >
+            <ArrowLeft size={16} />
+            <span>Back to Overview</span>
+          </button>
+        </div>
+
         <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-8 shadow-[0_1px_4px_rgba(27,50,112,0.08)] space-y-6">
+          {/* Attempt Selector Switcher */}
+          {completedList.length > 1 && (
+            <div className="p-2.5 bg-slate-50 border border-[#E2E8F4] rounded-[8px] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-left">
+              <span className="text-xs text-[#4A5568] font-medium">
+                Viewing Attempt {lastResultData?.attempt_number}
+              </span>
+              <div className="flex items-center space-x-1.5 flex-wrap gap-1">
+                {completedList.map((att) => {
+                  const isSelected = lastResultData?.id === att.id;
+                  return (
+                    <button
+                      key={att.id}
+                      type="button"
+                      onClick={() => {
+                        setLastResultData(att);
+                        if (att.passed) {
+                          setScreen('pass_result');
+                        } else {
+                          setScreen('fail_result');
+                        }
+                      }}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-[6px] transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#1B3270] text-white shadow-2xs'
+                          : 'bg-white border border-[#E2E8F4] text-[#4A5568] hover:bg-slate-100'
+                      }`}
+                    >
+                      Attempt {att.attempt_number} ({att.score_pct}%)
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Header & Icon */}
           <div className="text-center space-y-2">
             <div className="w-14 h-14 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center mx-auto ring-6 ring-amber-50/60">
@@ -2177,6 +2339,9 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
             <ArrowRight size={15} />
           </button>
         </div>
+
+        {/* ATTEMPT HISTORY */}
+        {renderAttemptHistory()}
       </div>
     );
   }
@@ -2218,7 +2383,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                 >
                   <div className="flex items-start space-x-3 flex-1 min-w-0">
                     <span className="font-bold text-[#1B3270] shrink-0 pt-0.5">
-                      Q{q.question_order}
+                      Q{idx + 1}
                     </span>
                     <div className="truncate">
                       <p className="text-[#1B3270] font-medium truncate">
@@ -2346,15 +2511,35 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
         }
       `}</style>
 
-      {/* TOP BAR: Left = Title, Center = Question info + progress bar, Right = Timer */}
-      <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-4 shadow-[0_1px_4px_rgba(27,50,112,0.06)] flex items-center justify-between gap-4">
-        <span className="text-xs font-bold text-[#1B3270] shrink-0">Diagnostic Test</span>
+      {/* TOP BAR: Left = Back & Restart, Center = Question info + progress bar, Right = Timer */}
+      <div className="bg-white border border-[#E2E8F4] rounded-[10px] p-3.5 sm:p-4 shadow-[0_1px_4px_rgba(27,50,112,0.06)] flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center space-x-2">
+          <button
+            type="button"
+            onClick={() => setShowExitModal(true)}
+            className="inline-flex items-center space-x-1 text-xs font-semibold text-[#4A5568] hover:text-[#1B3270] px-2.5 py-1.5 rounded-[6px] border border-[#E2E8F4] hover:bg-slate-50 transition-colors cursor-pointer"
+            title="Return to Overview"
+          >
+            <ArrowLeft size={14} />
+            <span>Back</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowRestartModal(true)}
+            className="inline-flex items-center space-x-1 text-xs font-semibold text-[#B91C1C] hover:text-[#991B1B] px-2.5 py-1.5 rounded-[6px] border border-[#FECACA] hover:bg-rose-50 transition-colors cursor-pointer"
+            title="Restart test from start"
+          >
+            <RotateCcw size={13} />
+            <span>Restart</span>
+          </button>
+        </div>
 
         <div className="flex items-center space-x-3">
           <span className="text-xs font-semibold text-[#4A5568] whitespace-nowrap">
             Question {currentQIndex + 1} of {questions.length || 15}
           </span>
-          <div className="w-20 sm:w-32 bg-[#E2E8F4] rounded-full h-2 overflow-hidden shrink-0">
+          <div className="w-20 sm:w-28 bg-[#E2E8F4] rounded-full h-2 overflow-hidden shrink-0">
             <div
               className="bg-[#1B3270] h-full transition-all duration-200"
               style={{ width: `${progressPct}%` }}
@@ -2373,7 +2558,7 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
           {/* Header with difficulty badge */}
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-[#94A3B8]">
-              Question {currentQ.question_order}
+              Question {currentQIndex + 1}
             </span>
             {getDifficultyBadge(currentQ.difficulty_level)}
           </div>
@@ -2467,6 +2652,77 @@ export const DtTab: React.FC<DtTabProps> = ({ candidate, onNavigateTab }) => {
                 Next
               </button>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* EXIT CONFIRMATION MODAL */}
+      {showExitModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-[10px] p-6 max-w-md w-full shadow-xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3 text-[#1B3270]">
+              <AlertCircle size={22} className="text-[#F59E0B]" />
+              <h3 className="text-base font-bold">Leave Test</h3>
+            </div>
+
+            <p className="text-xs text-[#4A5568] leading-relaxed">
+              Your answered questions for this attempt are saved. The test timer continues running in the background and you can resume this attempt anytime before time expires.
+            </p>
+
+            <div className="flex items-center justify-end space-x-3 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowExitModal(false)}
+                className="px-4 py-2 bg-[#1B3270] hover:bg-[#2952A3] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs cursor-pointer"
+              >
+                Continue Test
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExitModal(false);
+                  setScreen('intro');
+                  runStateChecks();
+                }}
+                className="px-4 py-2 border border-[#E2E8F4] hover:bg-slate-50 text-[#4A5568] text-xs font-medium rounded-[6px] transition-colors cursor-pointer"
+              >
+                Exit to Overview
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RESTART CONFIRMATION MODAL */}
+      {showRestartModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-[10px] p-6 max-w-md w-full shadow-xl space-y-4 animate-in zoom-in-95 duration-150 border border-rose-100">
+            <div className="flex items-center space-x-3 text-[#B91C1C]">
+              <RotateCcw size={22} className="text-[#EF4444]" />
+              <h3 className="text-base font-bold text-[#1B3270]">Restart Test from Start</h3>
+            </div>
+
+            <p className="text-xs text-[#4A5568] leading-relaxed">
+              This will abandon your current attempt and start a fresh attempt beginning at Question 1 with a new 30-minute timer. This will count toward your total attempts.
+            </p>
+
+            <div className="flex items-center justify-end space-x-3 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowRestartModal(false)}
+                className="px-4 py-2 border border-[#E2E8F4] hover:bg-slate-50 text-[#4A5568] text-xs font-medium rounded-[6px] transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRestartTest}
+                className="px-5 py-2 bg-[#B91C1C] hover:bg-[#991B1B] text-white text-xs font-bold rounded-[6px] transition-colors shadow-2xs flex items-center space-x-1.5 cursor-pointer"
+              >
+                <RotateCcw size={13} />
+                <span>Restart from Start</span>
+              </button>
+            </div>
           </div>
         </div>
       )}
