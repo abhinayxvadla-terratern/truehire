@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { supabase } from '../../lib/supabase';
+import { getInternalDashboardPath } from '../../utils/internalRouting';
 import {
   Bell,
   ChevronDown,
@@ -11,8 +12,32 @@ import {
   LucideIcon,
   LogOut,
   User,
+  Shield,
+  Briefcase,
+  Building2,
+  Building,
+  Award,
+  Users,
+  FileText,
+  GraduationCap,
+  BookOpen,
 } from 'lucide-react';
 import { formatTimeAgo } from '../../utils/formatters';
+
+const ROLE_CONFIG: Record<
+  string,
+  { label: string; icon: LucideIcon }
+> = {
+  super_admin: { label: 'Super Admin', icon: Shield },
+  partnerships_lead: { label: 'Partnerships Lead', icon: Briefcase },
+  supplier_partnerships_associate: { label: 'Supplier Partnerships', icon: Building2 },
+  employer_partnerships_associate: { label: 'Employer Partnerships', icon: Building },
+  placement_lead: { label: 'Placement Lead', icon: Award },
+  candidate_supplier_rm: { label: 'Candidate RM', icon: Users },
+  employer_requirements_rm: { label: 'Employer RM', icon: FileText },
+  academic_lead: { label: 'Academic Lead', icon: GraduationCap },
+  mentor: { label: 'Mentor', icon: BookOpen },
+};
 
 export interface NavItemConfig {
   id: string;
@@ -40,7 +65,15 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   isInternal = false,
   children,
 }) => {
-  const { user, profile, signOut } = useAuth();
+  const {
+    user,
+    profile,
+    allRoles,
+    activeRole,
+    hasMultipleRoles,
+    setActiveRole,
+    signOut,
+  } = useAuth();
   const navigate = useNavigate();
 
   // Mobile sidebar drawer
@@ -49,6 +82,10 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   // Profile dropdown (in sidebar bottom)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
+
+  // Role switcher dropdown
+  const [roleSwitcherOpen, setRoleSwitcherOpen] = useState(false);
+  const roleSwitcherRef = useRef<HTMLDivElement>(null);
 
   // Notification bell state & dropdown
   const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
@@ -94,6 +131,12 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
         !profileMenuRef.current.contains(e.target as Node)
       ) {
         setProfileMenuOpen(false);
+      }
+      if (
+        roleSwitcherRef.current &&
+        !roleSwitcherRef.current.contains(e.target as Node)
+      ) {
+        setRoleSwitcherOpen(false);
       }
       if (
         notifDropdownRef.current &&
@@ -347,13 +390,88 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
           </h1>
         </div>
 
-        {/* Right: Role Badge & Notification Bell */}
+        {/* Right: Role Switcher / Role Badge & Notification Bell */}
         <div className="flex items-center space-x-3 sm:space-x-4">
-          {/* Internal Role Badge */}
-          {roleBadge && (
-            <div className="hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-[4px] bg-[#F0F4FF] text-[#1B3270] text-[11px] font-medium tracking-wide">
-              {roleBadge}
+          {/* Multi-role Switcher (visible ONLY when hasMultipleRoles = true) */}
+          {isInternal && hasMultipleRoles ? (
+            <div className="relative" ref={roleSwitcherRef}>
+              <button
+                type="button"
+                onClick={() => setRoleSwitcherOpen((prev) => !prev)}
+                className="bg-[#F0F4FF] border border-[#E2E8F4] rounded-[99px] py-1 pl-2 pr-3 flex items-center gap-1.5 transition-colors hover:border-[#1B3270]/30 cursor-pointer select-none"
+                aria-label="Switch role"
+              >
+                {/* Small green dot indicator (home indicator) if currently on primary dashboard */}
+                {(activeRole === profile?.internal_role || (!activeRole && profile?.internal_role)) && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                )}
+                {(() => {
+                  const currentRoleKey = activeRole || profile?.internal_role || '';
+                  const conf = ROLE_CONFIG[currentRoleKey] || { label: 'Internal Staff', icon: User };
+                  const RoleIcon = conf.icon;
+                  return (
+                    <>
+                      <RoleIcon className="w-3.5 h-3.5 text-[#1B3270] shrink-0" />
+                      <span className="text-[12px] font-medium text-[#1B3270] whitespace-nowrap">
+                        {conf.label}
+                      </span>
+                    </>
+                  );
+                })()}
+                <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Role Switcher Dropdown (expanded state) */}
+              {roleSwitcherOpen && (
+                <div className="absolute right-0 top-[38px] w-[230px] bg-white border border-[#E2E8F4] rounded-[12px] shadow-lg py-2 z-200 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="px-3 pb-1.5 text-[10px] uppercase font-bold tracking-wider text-slate-400 select-none">
+                    SWITCH ROLE
+                  </div>
+                  <div className="space-y-0.5 px-1">
+                    {allRoles.map((r) => {
+                      const conf = ROLE_CONFIG[r] || { label: r, icon: User };
+                      const RoleIcon = conf.icon;
+                      const isPrimary = r === profile?.internal_role;
+                      const isActive = r === (activeRole || profile?.internal_role);
+
+                      return (
+                        <div
+                          key={r}
+                          onClick={() => {
+                            setActiveRole(r);
+                            setRoleSwitcherOpen(false);
+                            navigate(getInternalDashboardPath(r));
+                          }}
+                          className={`h-[40px] px-3 rounded-[8px] flex items-center gap-2.5 cursor-pointer transition-colors ${
+                            isActive
+                              ? 'bg-[#F0F4FF] text-[#1B3270] font-medium'
+                              : 'hover:bg-[#F8FAFD] text-slate-700'
+                          }`}
+                        >
+                          <RoleIcon className="w-3.5 h-3.5 text-[#1B3270] shrink-0" />
+                          <span className="text-[13px] truncate flex-1">{conf.label}</span>
+                          {isPrimary && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-[#6B7280]">
+                              Primary
+                            </span>
+                          )}
+                          {isActive && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#1B3270] shrink-0" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
+          ) : (
+            /* Single-role internal or external badge */
+            roleBadge && (
+              <div className="hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-[4px] bg-[#F0F4FF] text-[#1B3270] text-[11px] font-medium tracking-wide">
+                {roleBadge}
+              </div>
+            )
           )}
 
           {/* Notification Bell Dropdown */}

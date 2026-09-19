@@ -32,10 +32,15 @@ interface AuthContextType {
   user: User | null;
   session: Session | null;
   profile: Profile | null;
+  allRoles: InternalRole[];
+  activeRole: InternalRole | null;
+  hasMultipleRoles: boolean;
   loading: boolean;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<Profile | null>;
   refreshSession: () => Promise<{ session: Session | null; profile: Profile | null }>;
+  setActiveRole: (role: InternalRole) => void;
+  refreshRoles: () => Promise<InternalRole[]>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -44,6 +49,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [allRoles, setAllRoles] = useState<InternalRole[]>([]);
+  const [activeRole, setActiveRole] = useState<InternalRole | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
   const fetchProfile = async (userId: string): Promise<Profile | null> => {
@@ -65,6 +72,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const fetchRoles = async (userId: string, primaryRole?: InternalRole | null): Promise<InternalRole[]> => {
+    try {
+      const { data, error } = await supabase
+        .from('internal_user_roles')
+        .select('role, is_primary')
+        .eq('profile_id', userId);
+
+      if (!error && data && data.length > 0) {
+        const sorted = [...data].sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0));
+        return sorted.map((r) => r.role as InternalRole);
+      }
+    } catch (err) {
+      console.error('Error fetching internal user roles:', err);
+    }
+    return primaryRole ? [primaryRole] : [];
+  };
+
+  const refreshRoles = async (): Promise<InternalRole[]> => {
+    const currentUserId = user?.id || session?.user?.id;
+    if (!currentUserId || !profile?.is_internal) {
+      setAllRoles([]);
+      return [];
+    }
+    const roles = await fetchRoles(currentUserId, profile.internal_role);
+    setAllRoles(roles);
+    return roles;
+  };
+
   const refreshProfile = async (): Promise<Profile | null> => {
     let currentUserId = user?.id;
     if (!currentUserId) {
@@ -76,10 +111,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     if (!currentUserId) {
       setProfile(null);
+      setAllRoles([]);
+      setActiveRole(null);
       return null;
     }
     const p = await fetchProfile(currentUserId);
     setProfile(p);
+    if (p?.is_internal) {
+      const roles = await fetchRoles(p.id, p.internal_role);
+      setAllRoles(roles);
+      setActiveRole((prev) => prev || p.internal_role || roles[0] || null);
+    } else {
+      setAllRoles([]);
+      setActiveRole(null);
+    }
     return p;
   };
 
@@ -91,10 +136,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (currentSession?.user) {
         const p = await fetchProfile(currentSession.user.id);
         setProfile(p);
+        if (p?.is_internal) {
+          const roles = await fetchRoles(p.id, p.internal_role);
+          setAllRoles(roles);
+          setActiveRole((prev) => prev || p.internal_role || roles[0] || null);
+        } else {
+          setAllRoles([]);
+          setActiveRole(null);
+        }
         setLoading(false);
         return { session: currentSession, profile: p };
       }
       setProfile(null);
+      setAllRoles([]);
+      setActiveRole(null);
       setLoading(false);
       return { session: null, profile: null };
     } catch (err) {
@@ -114,9 +169,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(session?.user ?? null);
       if (session?.user) {
         const p = await fetchProfile(session.user.id);
-        if (mounted) setProfile(p);
+        if (mounted) {
+          setProfile(p);
+          if (p?.is_internal) {
+            const roles = await fetchRoles(p.id, p.internal_role);
+            if (mounted) {
+              setAllRoles(roles);
+              setActiveRole((prev) => prev || p.internal_role || roles[0] || null);
+            }
+          } else {
+            setAllRoles([]);
+            setActiveRole(null);
+          }
+        }
       } else {
-        if (mounted) setProfile(null);
+        if (mounted) {
+          setProfile(null);
+          setAllRoles([]);
+          setActiveRole(null);
+        }
       }
       if (mounted) setLoading(false);
     });
@@ -130,9 +201,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         if (newSession?.user) {
           const p = await fetchProfile(newSession.user.id);
-          if (mounted) setProfile(p);
+          if (mounted) {
+            setProfile(p);
+            if (p?.is_internal) {
+              const roles = await fetchRoles(p.id, p.internal_role);
+              if (mounted) {
+                setAllRoles(roles);
+                setActiveRole((prev) => prev || p.internal_role || roles[0] || null);
+              }
+            } else {
+              setAllRoles([]);
+              setActiveRole(null);
+            }
+          }
         } else {
-          if (mounted) setProfile(null);
+          if (mounted) {
+            setProfile(null);
+            setAllRoles([]);
+            setActiveRole(null);
+          }
         }
         if (mounted) setLoading(false);
       }
@@ -153,8 +240,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setSession(null);
       setProfile(null);
+      setAllRoles([]);
+      setActiveRole(null);
     }
   };
+
+  const hasMultipleRoles = allRoles.length > 1;
 
   return (
     <AuthContext.Provider
@@ -162,10 +253,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         session,
         profile,
+        allRoles,
+        activeRole,
+        hasMultipleRoles,
         loading,
         signOut,
         refreshProfile,
         refreshSession,
+        setActiveRole,
+        refreshRoles,
       }}
     >
       {children}

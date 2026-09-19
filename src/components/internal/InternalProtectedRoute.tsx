@@ -13,7 +13,7 @@ export const InternalProtectedRoute: React.FC<InternalProtectedRouteProps> = ({
   children,
   requiredRole,
 }) => {
-  const { session, profile, loading, signOut } = useAuth();
+  const { session, profile, allRoles, setActiveRole, loading, signOut } = useAuth();
   const location = useLocation();
 
   const isUnauthorizedExternalUser = !!session && (!profile || !profile.is_internal);
@@ -23,6 +23,12 @@ export const InternalProtectedRoute: React.FC<InternalProtectedRouteProps> = ({
       signOut();
     }
   }, [isUnauthorizedExternalUser, signOut]);
+
+  useEffect(() => {
+    if (requiredRole && (allRoles.includes(requiredRole) || profile?.internal_role === requiredRole)) {
+      setActiveRole(requiredRole);
+    }
+  }, [requiredRole, allRoles, profile?.internal_role, setActiveRole]);
 
   if (loading) {
     return (
@@ -54,10 +60,16 @@ export const InternalProtectedRoute: React.FC<InternalProtectedRouteProps> = ({
     );
   }
 
-  // 3. If requiredRole is specified and does not match: redirect to user's assigned dashboard
-  if (requiredRole && profile.internal_role !== requiredRole) {
-    const fallback = getInternalDashboardPath(profile.internal_role);
-    return <Navigate to={fallback} replace />;
+  // 3. If requiredRole is specified:
+  // Allow if user has this role in allRoles OR if it matches their primary profile.internal_role
+  if (requiredRole) {
+    const hasRoleAccess =
+      allRoles.includes(requiredRole) || profile.internal_role === requiredRole;
+
+    if (!hasRoleAccess) {
+      const fallback = getInternalDashboardPath(profile.internal_role);
+      return <Navigate to={fallback} replace />;
+    }
   }
 
   return <>{children}</>;

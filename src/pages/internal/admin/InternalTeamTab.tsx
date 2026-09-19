@@ -11,6 +11,7 @@ import {
   RotateCw,
   Loader2,
   Trash2,
+  X,
 } from 'lucide-react';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
 
@@ -22,6 +23,14 @@ interface TeamMemberRow {
   internal_role: InternalRole | null;
   is_internal: boolean;
   created_at: string;
+}
+
+interface InternalUserRoleRow {
+  id: string;
+  profile_id: string;
+  role: InternalRole;
+  is_primary: boolean;
+  assigned_at: string | null;
 }
 
 interface PendingInviteRow {
@@ -48,6 +57,27 @@ const ALL_ROLES: { value: InternalRole; label: string; category: 'admin' | 'part
   { value: 'mentor', label: 'Clinical & Language Mentor', category: 'academic' },
 ];
 
+export const ROLE_OPTIONS: {
+  value: InternalRole;
+  label: string;
+  description: string;
+}[] = [
+  { value: 'super_admin', label: 'Super Admin', description: 'System-wide administrative authority' },
+  { value: 'partnerships_lead', label: 'Partnerships Lead', description: 'Oversight of supply and demand partnerships' },
+  { value: 'supplier_partnerships_associate', label: 'Supplier Partnerships', description: 'Agency onboarding and partner performance' },
+  { value: 'employer_partnerships_associate', label: 'Employer Partnerships', description: 'Healthcare employer relationship management' },
+  { value: 'placement_lead', label: 'Placement Lead', description: 'Candidate placement pipeline oversight' },
+  { value: 'candidate_supplier_rm', label: 'Candidate RM', description: 'Candidate onboarding and supplier relationship management' },
+  { value: 'employer_requirements_rm', label: 'Employer RM', description: 'Job order matching and interview coordination' },
+  { value: 'academic_lead', label: 'Academic Lead', description: 'Assessment quality and test reviewer assignment' },
+  { value: 'mentor', label: 'Mentor', description: 'Speaking assessments and candidate coaching' },
+];
+
+export const getRoleLabel = (role?: string | null): string => {
+  const found = ROLE_OPTIONS.find((r) => r.value === role);
+  return found ? found.label : role || 'Internal';
+};
+
 export const InternalTeamTab: React.FC = () => {
   const { user } = useAuth();
 
@@ -68,6 +98,22 @@ export const InternalTeamTab: React.FC = () => {
   const [copiedLink, setCopiedLink] = useState(false);
 
   const [members, setMembers] = useState<TeamMemberRow[]>([]);
+  const [userRolesMap, setUserRolesMap] = useState<Record<string, InternalUserRoleRow[]>>({});
+  const [showAllRolesFor, setShowAllRolesFor] = useState<Record<string, boolean>>({});
+  const [addRoleMemberId, setAddRoleMemberId] = useState<string | null>(null);
+  const [roleToRemove, setRoleToRemove] = useState<{
+    memberId: string;
+    memberName: string;
+    role: InternalRole;
+    roleLabel: string;
+  } | null>(null);
+  const [changePrimaryMember, setChangePrimaryMember] = useState<{
+    memberId: string;
+    memberName: string;
+    currentPrimary: InternalRole;
+  } | null>(null);
+  const [selectedNewPrimary, setSelectedNewPrimary] = useState<InternalRole | null>(null);
+
   const [pendingInvites, setPendingInvites] = useState<PendingInviteRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
@@ -85,7 +131,7 @@ export const InternalTeamTab: React.FC = () => {
     try {
       const nowISO = new Date().toISOString();
 
-      const [membersRes, invitesRes] = await Promise.all([
+      const [membersRes, invitesRes, rolesRes] = await Promise.all([
         supabase
           .from('profiles')
           .select('id, first_name, last_name, email, internal_role, is_internal, created_at')
@@ -97,6 +143,9 @@ export const InternalTeamTab: React.FC = () => {
           .eq('used', false)
           .gt('expires_at', nowISO)
           .order('created_at', { ascending: false }),
+        supabase
+          .from('internal_user_roles')
+          .select('*'),
       ]);
 
       if (membersRes.data) {
@@ -104,6 +153,14 @@ export const InternalTeamTab: React.FC = () => {
       }
       if (invitesRes.data) {
         setPendingInvites(invitesRes.data as PendingInviteRow[]);
+      }
+      if (rolesRes.data) {
+        const map: Record<string, InternalUserRoleRow[]> = {};
+        (rolesRes.data as any[]).forEach((r) => {
+          if (!map[r.profile_id]) map[r.profile_id] = [];
+          map[r.profile_id].push(r);
+        });
+        setUserRolesMap(map);
       }
     } catch (err) {
       console.error('Error fetching team members and invites:', err);
@@ -114,6 +171,177 @@ export const InternalTeamTab: React.FC = () => {
 
   useEffect(() => {
     fetchTeamData();
+  }, []);
+
+  // Handle Add Role
+  const handleAddRole = async (member: TeamMemberRow, roleToAdd: InternalRole) => {
+    if (!user?.id) return;
+    const roleLabel = getRoleLabel(roleToAdd);
+    const memberName = `${member.first_name || ''} ${member.last_name || ''}`.trim() || member.email;
+
+    // Optimistic UI
+    const tempRole: InternalUserRoleRow = {
+      id: `temp-${Date.now()}`,
+      profile_id: member.id,
+      role: roleToAdd,
+      is_primary: false,
+      assigned_at: new Date().toISOString(),
+    };
+    setUserRolesMap((prev) => ({
+      ...prev,
+      [member.id]: [...(prev[member.id] || []), tempRole],
+    }));
+    setAddRoleMemberId(null);
+
+    try {
+      const { data, error } = await supabase
+        .from('internal_user_roles')
+        .insert({
+          profile_id: member.id,
+          role: roleToAdd,
+          is_primary: false,
+          assigned_by: user.id,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      if (data) {
+        setUserRolesMap((prev) => ({
+          ...prev,
+          [member.id]: (prev[member.id] || []).map((r) => (r.id === tempRole.id ? (data as any) : r)),
+        }));
+      }
+
+      // Send in-app notification to member
+      await supabase.from('notifications').insert({
+        user_id: member.id,
+        title: 'Role Added',
+        message: `Super Admin has given you access to the ${roleLabel} dashboard. Switch roles using the role switcher in the top bar.`,
+        type: 'role_added',
+        read: false,
+      });
+
+      showToast(`${roleLabel} added to ${memberName}.`);
+    } catch (err: any) {
+      console.error('Error adding role:', err);
+      showToast('Failed to add role.');
+      fetchTeamData();
+    }
+  };
+
+  // Handle Confirm Remove Role
+  const handleConfirmRemoveRole = async () => {
+    if (!roleToRemove) return;
+    const { memberId, memberName, role, roleLabel } = roleToRemove;
+
+    // Optimistic UI
+    setUserRolesMap((prev) => ({
+      ...prev,
+      [memberId]: (prev[memberId] || []).filter((r) => r.role !== role),
+    }));
+    setRoleToRemove(null);
+
+    try {
+      const { error } = await supabase
+        .from('internal_user_roles')
+        .delete()
+        .eq('profile_id', memberId)
+        .eq('role', role);
+
+      if (error) throw error;
+
+      // Send in-app notification to member
+      await supabase.from('notifications').insert({
+        user_id: memberId,
+        title: 'Role Removed',
+        message: `Your access to the ${roleLabel} dashboard has been removed.`,
+        type: 'role_removed',
+        read: false,
+      });
+
+      showToast(`${roleLabel} removed from ${memberName}.`);
+    } catch (err: any) {
+      console.error('Error removing role:', err);
+      showToast('Failed to remove role.');
+      fetchTeamData();
+    }
+  };
+
+  // Handle Confirm Change Primary Role
+  const handleConfirmChangePrimary = async () => {
+    if (!changePrimaryMember || !selectedNewPrimary) return;
+    const { memberId, memberName, currentPrimary } = changePrimaryMember;
+
+    if (selectedNewPrimary === currentPrimary) {
+      setChangePrimaryMember(null);
+      return;
+    }
+
+    const newRoleLabel = getRoleLabel(selectedNewPrimary);
+
+    // Optimistic UI
+    setMembers((prev) =>
+      prev.map((m) => (m.id === memberId ? { ...m, internal_role: selectedNewPrimary } : m))
+    );
+    setUserRolesMap((prev) => ({
+      ...prev,
+      [memberId]: (prev[memberId] || []).map((r) => ({
+        ...r,
+        is_primary: r.role === selectedNewPrimary,
+      })),
+    }));
+    setChangePrimaryMember(null);
+
+    try {
+      // 1. UPDATE profiles
+      await supabase
+        .from('profiles')
+        .update({ internal_role: selectedNewPrimary })
+        .eq('id', memberId);
+
+      // 2. UPDATE internal_user_roles
+      await supabase
+        .from('internal_user_roles')
+        .update({ is_primary: false })
+        .eq('profile_id', memberId);
+
+      await supabase
+        .from('internal_user_roles')
+        .update({ is_primary: true })
+        .eq('profile_id', memberId)
+        .eq('role', selectedNewPrimary);
+
+      // 3. Send in-app notification to member
+      await supabase.from('notifications').insert({
+        user_id: memberId,
+        title: 'Primary Role Updated',
+        message: `Your primary dashboard has been changed to ${newRoleLabel}. This is now your default view on login.`,
+        type: 'primary_role_updated',
+        read: false,
+      });
+
+      showToast(`Primary role updated for ${memberName}.`);
+    } catch (err: any) {
+      console.error('Error changing primary role:', err);
+      showToast('Failed to change primary role.');
+      fetchTeamData();
+    }
+  };
+
+  // Close popovers on click outside
+  useEffect(() => {
+    const handleTableOutsideClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.roles-cell-container')) {
+        setAddRoleMemberId(null);
+        setRoleToRemove(null);
+        setChangePrimaryMember(null);
+      }
+    };
+    document.addEventListener('mousedown', handleTableOutsideClick);
+    return () => document.removeEventListener('mousedown', handleTableOutsideClick);
   }, []);
 
   const handleGenerateInvite = async (e: React.FormEvent) => {
@@ -457,7 +685,7 @@ export const InternalTeamTab: React.FC = () => {
                 <thead className="bg-[#F8FAFD] border-b border-[#E2E8F4] text-slate-500 font-semibold uppercase tracking-wider">
                   <tr>
                     <th className="py-3 px-4">Full Name</th>
-                    <th className="py-3 px-4">Internal Role</th>
+                    <th className="py-3 px-4">Roles</th>
                     <th className="py-3 px-4">Email</th>
                     <th className="py-3 px-4">Account Status</th>
                     <th className="py-3 px-4">Created Date</th>
@@ -470,25 +698,241 @@ export const InternalTeamTab: React.FC = () => {
                       m.first_name && m.last_name
                         ? `${m.first_name} ${m.last_name}`
                         : 'Staff User';
-                    const roleLabel =
-                      ALL_ROLES.find((r) => r.value === m.internal_role)?.label ||
-                      m.internal_role ||
-                      'Internal';
                     const isSelf = m.id === user?.id;
+
+                    const memberRoles = userRolesMap[m.id] || (m.internal_role ? [{
+                      id: `fallback-${m.id}`,
+                      profile_id: m.id,
+                      role: m.internal_role,
+                      is_primary: true,
+                      assigned_at: m.created_at,
+                    }] : []);
+
+                    const primaryRoleObj = memberRoles.find((r) => r.is_primary) || memberRoles[0];
+                    const primaryRole = (primaryRoleObj?.role || m.internal_role || 'super_admin') as InternalRole;
+                    const secondaryRoles = memberRoles.filter((r) => r.role !== primaryRole);
+                    const unassignedRoles = ROLE_OPTIONS.filter((opt) => !memberRoles.some((mr) => mr.role === opt.value));
 
                     return (
                       <tr key={m.id} className="hover:bg-[#F8FAFD] transition-colors">
-                        <td className="py-3.5 px-4 font-semibold text-slate-900">
+                        <td className="py-3.5 px-4 font-semibold text-slate-900 whitespace-nowrap">
                           {fullName} {isSelf && <span className="text-[10px] text-blue-600 font-normal">(You)</span>}
                         </td>
-                        <td className="py-3.5 px-4">
-                          <span
-                            className={`px-2.5 py-0.5 rounded text-[11px] font-semibold ${getRoleBadgeClass(
-                              m.internal_role
-                            )}`}
-                          >
-                            {roleLabel}
-                          </span>
+                        <td className="py-3.5 px-4 relative roles-cell-container">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {/* Primary Role Badge (navy, no ×, click to change primary) */}
+                            <div className="relative group/primary">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setChangePrimaryMember({
+                                    memberId: m.id,
+                                    memberName: fullName,
+                                    currentPrimary: primaryRole,
+                                  });
+                                  setSelectedNewPrimary(primaryRole);
+                                  setAddRoleMemberId(null);
+                                  setRoleToRemove(null);
+                                }}
+                                className="px-2.5 py-0.5 rounded-[4px] text-[11px] font-semibold bg-[#1B3270] text-white hover:bg-[#2952A3] transition-colors cursor-pointer shadow-2xs whitespace-nowrap"
+                                title="Primary role"
+                              >
+                                <span>{getRoleLabel(primaryRole)}</span>
+                              </button>
+                              <div className="absolute bottom-full left-0 mb-1.5 hidden group-hover/primary:block z-50 pointer-events-none">
+                                <div className="bg-slate-900 text-white text-[10px] py-1 px-2 rounded whitespace-nowrap shadow-md">
+                                  Primary role
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Secondary Role Badges */}
+                            {(() => {
+                              const isExpanded = !!showAllRolesFor[m.id];
+                              const showCount = isExpanded || secondaryRoles.length <= 1 ? secondaryRoles.length : 1;
+                              const visibleSecondary = secondaryRoles.slice(0, showCount);
+                              const remainingSecondary = secondaryRoles.slice(showCount);
+
+                              return (
+                                <>
+                                  {visibleSecondary.map((sr) => (
+                                    <span
+                                      key={sr.id || sr.role}
+                                      className="px-2 py-0.5 rounded-[4px] text-[11px] font-medium bg-[#F0F4FF] text-[#1B3270] border border-[#E2E8F4] inline-flex items-center gap-1 whitespace-nowrap"
+                                    >
+                                      <span>{getRoleLabel(sr.role)}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setRoleToRemove({
+                                            memberId: m.id,
+                                            memberName: fullName,
+                                            role: sr.role,
+                                            roleLabel: getRoleLabel(sr.role),
+                                          });
+                                          setAddRoleMemberId(null);
+                                          setChangePrimaryMember(null);
+                                        }}
+                                        className="text-[#1B3270]/60 hover:text-[#EF4444] p-0.5 rounded transition-colors cursor-pointer"
+                                        title={`Remove ${getRoleLabel(sr.role)}`}
+                                      >
+                                        <X className="w-3 h-3" />
+                                      </button>
+                                    </span>
+                                  ))}
+
+                                  {/* [+n more] badge if 3+ roles and collapsed */}
+                                  {!isExpanded && remainingSecondary.length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowAllRolesFor((prev) => ({ ...prev, [m.id]: true }))}
+                                      className="relative group/more px-1.5 py-0.5 rounded-[4px] text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200 cursor-pointer whitespace-nowrap"
+                                    >
+                                      <span>+{remainingSecondary.length} more</span>
+                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover/more:block z-50 pointer-events-none">
+                                        <div className="bg-slate-900 text-white text-[10px] py-1 px-2.5 rounded shadow-lg whitespace-nowrap text-left leading-relaxed">
+                                          {remainingSecondary.map((r) => getRoleLabel(r.role)).join(', ')}
+                                        </div>
+                                      </div>
+                                    </button>
+                                  )}
+
+                                  {/* Show less button if expanded */}
+                                  {isExpanded && secondaryRoles.length > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowAllRolesFor((prev) => ({ ...prev, [m.id]: false }))}
+                                      className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-medium text-slate-400 hover:text-slate-600 cursor-pointer"
+                                    >
+                                      Show less
+                                    </button>
+                                  )}
+                                </>
+                              );
+                            })()}
+
+                            {/* + Add Role button */}
+                            {unassignedRoles.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setAddRoleMemberId((prev) => (prev === m.id ? null : m.id));
+                                  setRoleToRemove(null);
+                                  setChangePrimaryMember(null);
+                                }}
+                                className="text-[12px] font-medium text-[#1B3270] hover:text-[#2952A3] hover:underline cursor-pointer ml-1 select-none whitespace-nowrap"
+                              >
+                                + Add Role
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Inline Dropdown: Add Role */}
+                          {addRoleMemberId === m.id && (
+                            <div className="absolute left-4 top-full mt-1 w-[280px] bg-white border border-[#E2E8F4] rounded-[10px] shadow-[0_4px_20px_rgba(27,50,112,0.14)] p-1.5 z-100 animate-in fade-in zoom-in-95 duration-100">
+                              <div className="px-2 py-1 border-b border-[#E2E8F4] flex items-center justify-between mb-1">
+                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                                  Add Role
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setAddRoleMemberId(null)}
+                                  className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <div className="max-h-[220px] overflow-y-auto space-y-0.5">
+                                {unassignedRoles.map((opt) => (
+                                  <button
+                                    key={opt.value}
+                                    type="button"
+                                    onClick={() => handleAddRole(m, opt.value)}
+                                    className="w-full text-left p-2 rounded-[6px] hover:bg-[#F0F4FF] transition-colors cursor-pointer group"
+                                  >
+                                    <div className="text-[12px] font-semibold text-[#1B3270] group-hover:text-[#2952A3]">
+                                      {opt.label}
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 leading-snug">
+                                      {opt.description}
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Inline Popover: Remove Role Confirmation */}
+                          {roleToRemove && roleToRemove.memberId === m.id && (
+                            <div className="absolute left-4 top-full mt-1 w-[260px] bg-white border border-rose-200 rounded-[10px] shadow-[0_4px_20px_rgba(239,68,68,0.15)] p-3 z-100 animate-in fade-in zoom-in-95 duration-100">
+                              <div className="text-xs font-bold text-slate-800 mb-1">
+                                Remove {roleToRemove.roleLabel} from {roleToRemove.memberName}?
+                              </div>
+                              <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
+                                Their access to the {roleToRemove.roleLabel} dashboard will be removed.
+                              </p>
+                              <div className="flex items-center justify-end space-x-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setRoleToRemove(null)}
+                                  className="px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100 rounded-[6px] transition-colors cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleConfirmRemoveRole}
+                                  className="px-2.5 py-1 text-xs font-semibold text-white bg-[#EF4444] hover:bg-[#DC2626] rounded-[6px] transition-colors cursor-pointer shadow-2xs"
+                                >
+                                  Yes, remove
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Inline Popover: Change Primary Role */}
+                          {changePrimaryMember && changePrimaryMember.memberId === m.id && (
+                            <div className="absolute left-4 top-full mt-1 w-[270px] bg-white border border-[#E2E8F4] rounded-[10px] shadow-[0_4px_20px_rgba(27,50,112,0.14)] p-3 z-100 animate-in fade-in zoom-in-95 duration-100">
+                              <div className="text-xs font-bold text-[#1B3270] mb-0.5">
+                                Change primary role?
+                              </div>
+                              <p className="text-[11px] text-slate-500 mb-2.5">
+                                This determines their default dashboard.
+                              </p>
+                              <div className="space-y-1.5 mb-3">
+                                <label className="text-[10px] uppercase font-bold text-slate-400 block">
+                                  Select Primary Role
+                                </label>
+                                <select
+                                  value={selectedNewPrimary || ''}
+                                  onChange={(e) => setSelectedNewPrimary(e.target.value as InternalRole)}
+                                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-[#E2E8F4] rounded-[6px] text-xs font-medium text-slate-800 outline-none focus:border-[#1B3270]"
+                                >
+                                  {memberRoles.map((r) => (
+                                    <option key={r.role} value={r.role}>
+                                      {getRoleLabel(r.role)} {r.role === m.internal_role ? '(Current Primary)' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="flex items-center justify-end space-x-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setChangePrimaryMember(null)}
+                                  className="px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100 rounded-[6px] transition-colors cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleConfirmChangePrimary}
+                                  className="px-3 py-1 text-xs font-semibold text-white bg-[#1B3270] hover:bg-[#2952A3] rounded-[6px] transition-colors cursor-pointer shadow-2xs"
+                                >
+                                  Set as Primary
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 font-mono text-[11px] text-slate-600">
                           {m.email}

@@ -1729,6 +1729,48 @@ export type Database = {
           },
         ]
       }
+      internal_user_roles: {
+        Row: {
+          assigned_at: string | null
+          assigned_by: string | null
+          id: string
+          is_primary: boolean | null
+          profile_id: string
+          role: string
+        }
+        Insert: {
+          assigned_at?: string | null
+          assigned_by?: string | null
+          id?: string
+          is_primary?: boolean | null
+          profile_id: string
+          role: string
+        }
+        Update: {
+          assigned_at?: string | null
+          assigned_by?: string | null
+          id?: string
+          is_primary?: boolean | null
+          profile_id?: string
+          role?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "internal_user_roles_assigned_by_fkey"
+            columns: ["assigned_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "internal_user_roles_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       job_applications: {
         Row: {
           candidate_id: string
@@ -2974,6 +3016,7 @@ export type Database = {
       get_my_supplier_id: { Args: never; Returns: string }
       get_partner_invite_details: { Args: { p_token: string }; Returns: Json }
       get_team_invite_details: { Args: { p_token: string }; Returns: Json }
+      has_role: { Args: { check_role: string }; Returns: boolean }
       is_internal: { Args: never; Returns: boolean }
       is_super_admin: { Args: never; Returns: boolean }
     }
